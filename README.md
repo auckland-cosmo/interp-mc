@@ -19,3 +19,5 @@ cut = 8
 faction_cut = 0.2 
 
 Then you could run CosmoMC as usual. 
+
+Note that the repo contains a single .patch file.
