@@ -1,0 +1,2589 @@
+diff -rcBN cosmomc/camb/Makefile_main_modpk modecode/camb/Makefile_main_modpk
+*** cosmomc/camb/Makefile_main_modpk	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/Makefile_main_modpk	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,75 ----
++ 
++ #Files containing evolution equations initial power spectrum module
++ EQUATIONS     = equations
++ POWERSPECTRUM = power_tilt
++ REIONIZATION = reionization
++ RECOMBINATION = recfast
++ MODULES = modules
++ CMBMAIN = cmbmain
++ CAMBFILE = camb
++ 
++ #Module doing non-linear scaling
++ NONLINEAR     = halofit
++ 
++ #Driver program
++ DRIVER        = inidriver.F90
++ #DRIVER        = sigma8.f90
++ #DRIVER        = tester.f90
++ 
++ #Driver for standalone P(k) code
++ PKDRIVER	= driver_modpk.f90
++ 
++ CAMBLIB       = libcamb.a
++ 
++ #Shouldn't need to change anything else...
++ 
++ F90FLAGS      = $(FFLAGS)
++ HEALPIXLD     = -L$(HEALPIXDIR)/lib -lhealpix -L$(FITSDIR) -l$(FITSLIB)
++ 
++ CAMBOBJ       = constants.o utils.o subroutines.o inifile.o \
++ 	$(POWERSPECTRUM).o $(RECOMBINATION).o $(REIONIZATION).o $(MODULES).o \
++ 	bessels.o $(EQUATIONS).o $(NONLINEAR).o lensing.o $(CMBMAIN).o $(CAMBFILE).o
++ 
++ MODPKOBJ = modpk_modules.o modpk_potential.o modpk_utils.o modpk_odeint.o \
++ 	modpk_backgrnd.o modpk.o
++ 
++ default: camb
++ 
++ all: camb $(CAMBLIB) powspec
++ 
++ 
++ subroutines.o: constants.o utils.o
++ $(POWERSPECTRUM).o: subroutines.o  inifile.o
++ $(RECOMBINATION).o: subroutines.o inifile.o
++ $(REIONIZATION).o: constants.o inifile.o
++ $(MODULES).o: $(REIONIZATION).o $(RECOMBINATION).o $(POWERSPECTRUM).o
++ bessels.o: $(MODULES).o
++ $(EQUATIONS).o: bessels.o
++ $(NONLINEAR).o:  $(MODULES).o
++ lensing.o: bessels.o
++ $(CMBMAIN).o: lensing.o $(NONLINEAR).o $(EQUATIONS).o
++ $(CAMBFILE).o: $(CMBMAIN).o
++ 
++ 
++ camb: $(MODPKOBJ) $(CAMBOBJ) $(DRIVER)
++ 	$(F90C) $(F90FLAGS) $(MODPKOBJ) $(CAMBOBJ) $(DRIVER) -o $@
++ 
++ $(CAMBLIB): $(MODPKOBJ) $(CAMBOBJ)
++ 	ar -r $@ $?
++ 
++ camb_fits: writefits.f90 $(CAMBOBJ) $(DRIVER)
++ 	$(F90C) $(F90FLAGS) -I$(HEALPIXDIR)/include $(CAMBOBJ) writefits.f90 $(DRIVER) $(HEALPIXLD) -DWRITE_FITS -o $@
++ 
++ powspec : $(MODPKOBJ) $(PKDRIVER)
++ 	$(F90C) $(F90FLAGS) $(MODPKOBJ) $(PKDRIVER) -o $@
++ 
++ %.o: %.f90
++ 	$(F90C) $(F90FLAGS) -c $*.f90
++ 
++ utils.o:
++ 	$(F90C) $(F90FLAGS) -c utils.F90	
++ 
++ clean:
++ 	-rm -f *.o *.a *.d core *.mod
++ 
++ 
+diff -rcBN cosmomc/camb/driver_modpk.f90 modecode/camb/driver_modpk.f90
+*** cosmomc/camb/driver_modpk.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/driver_modpk.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,59 ----
++ PROGRAM driver_modpk
++   USE camb_interface
++   USE modpkparams
++   USE access_modpk, ONLY: potinit, evolve
++   IMPLICIT NONE
++   INTEGER*4 :: i
++   DOUBLE PRECISION :: kin, pow, powt, kmin, kmax, dlnk, pmin, pmax
++   DOUBLE PRECISION :: pspivot, ptpivot
++   DOUBLE PRECISION :: ps0, ps1, ps2, pt0, pt1, pt2
++ 
++   potential_choice = 2
++   vparams_num = 2
++   vnderivs=.false.
++ 
++   slowroll_infl_end =.true.
++   instreheat=.false.
++   phi_infl_end=0.
++ 
++   kmin = log(5.d-4)
++   kmax = log(5.d0)
++ 
++   vparams(1) = -2.2
++   vparams(2) = 0.8
++ 
++   phi_init0 = 20.
++   k_pivot=0.05d0
++   N_pivot=55.d0
++   findiffdphi = epsilon(1.d0)
++ 
++   CALL potinit()
++ 
++   IF(pk_bad==0) THEN 
++ 
++      call evolve(k_pivot,pspivot,ptpivot)
++      
++      DO i=1,500
++         kin=exp(kmin+REAL(i)*(kmax-kmin)/REAL(500-1))
++         CALL evolve(kin,pow,powt)
++         WRITE(*,*) kin,pow,powt
++      END DO
++ 
++      dlnk = 0.1d0
++      call evolve(k_pivot,ps1,pt1)
++      write(*,*)
++      write(*,*) 'A_s =', ps1
++      write(*,*) 'r =', pt1/ps1
++      call evolve(k_pivot,ps0,pt0)
++      call evolve(k_pivot*exp(-dlnk),ps1,pt1)
++      call evolve(k_pivot*exp(dlnk),ps2,pt2)
++      write(*,*) 'n_s =', 1.d0+log(ps2/ps1)/dlnk/2.d0
++      write(*,*) 'n_t =', log(pt2/pt1)/dlnk/2.d0
++      write(*,*) 'dn_s/dlnk =', log(ps1*ps2/ps0**2)/dlnk**2
++ 
++   ELSE
++      write(*,*) 'pk_bad =', pk_bad
++   ENDIF
++ 
++   STOP
++ END PROGRAM driver_modpk
+diff -rcBN cosmomc/camb/modpk.f90 modecode/camb/modpk.f90
+*** cosmomc/camb/modpk.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,130 ----
++ MODULE access_modpk
++   USE camb_interface
++   IMPLICIT NONE
++   PRIVATE
++   PUBLIC :: potinit, evolve
++ 
++ ! Number of k values for computing spline of P(k).
++ ! Set to lower numbers for smoother potentials.
++   INTEGER*4, PARAMETER, PUBLIC :: pkspline_n = 500
++ 
++   DOUBLE PRECISION, PARAMETER, PUBLIC :: pkspline_kmin = log(1.d-5), pkspline_kmax = log(5.d0)
++   DOUBLE PRECISION, PUBLIC :: pkspline_k(pkspline_n), pkspline_p(pkspline_n), &
++ 	pkspline_p2der(pkspline_n), pkspline_pt(pkspline_n), &
++ 	pkspline_pt2der(pkspline_n)
++ 
++ CONTAINS
++ 
++   SUBROUTINE potinit()
++     USE modpkparams
++     USE powersp
++     USE background_evolution, ONLY : backgrnd
++     USE potential, ONLY : initialphi
++     IMPLICIT NONE
++     DOUBLE PRECISION :: k,klo,khi
++ 
++     k_start=1.d2
++     eval_ps=1.d2
++     !
++     !     Solve the background equations
++     !
++     pk_bad = 0
++     phi_init = initialphi(phi_init0)
++     CALL backgrnd
++     RETURN
++   END SUBROUTINE potinit
++ 
++   SUBROUTINE evolve(kin, pow, powt)
++     USE modpk_odeint
++     USE ode_path
++     USE modpkparams
++     USE internals
++     USE powersp
++     USE potential, ONLY: pot,powerspectrum, dVdphi, getH, getHdot
++     USE modpk_utils, ONLY : locate, polint, derivs, rkqs
++     IMPLICIT NONE
++     INTEGER*4, PARAMETER :: NVAR=10
++     INTEGER*4 :: i,j
++     DOUBLE PRECISION :: accuracy,h1,hmin,x1,x2 
++     DOUBLE PRECISION, DIMENSION(NVAR) :: y 
++     DOUBLE PRECISION, INTENT(IN) :: kin
++     DOUBLE PRECISION, INTENT(OUT) :: pow, powt
++     DOUBLE PRECISION :: dum,ah,alpha_ik,dalpha,dh,p_ik,delp
++     !
++     !     Set initial conditions
++     !
++     !     y(1)=phi              dydx(1)=dphi/dalpha
++     !     y(2)=dphi/dalpha      dydx(2)=d^2phi/dalpha^2
++     !     y(3)=u1               dydx(3)=du1/dalpha
++     !     y(4)=du1/dalpha       dydx(4)=d^2u1/dalpha^2
++     !     y(5)=u2               dydx(5)=du2/dalpha
++     !     y(6)=du2/dalpha       dydx(6)=d^2u2/dalpha^2
++     k=kin*Mpc2Mpl
++ 
++     ah=LOG(k/k_start)     
++     i= locate(aharr, ah)
++     IF(i.eq.0.) THEN
++        PRINT*,'MODPK: The background solution worked, but the k you requested is outside'
++        PRINT*,'MODPK: the bounds of the background you solved for. Please reconsider'
++        PRINT*,'MODPK: your phi_init and N_pivot combo.'
++        PRINT*,'MODPK: QUITTING'
++        STOP
++     END IF
++     j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++     CALL polint(aharr(j:j+4), phiarr(j:j+4), ah, p_ik, delp)
++     CALL polint(aharr(j:j+4), lna(j:j+4), ah,  alpha_ik, dalpha)
++     CALL polint(aharr(j:j+4), hubarr(j:j+4), ah,  h_ik, dh)
++     a_ik=EXP(alpha_ik)*a_init
++     x1=alpha_ik
++     IF(x1.le.0.) THEN
++        PRINT*,'MODPK: The phi_init you specified is too small to give'
++        PRINT*,'MODPK: sufficient efolds of inflation. We cannot self-consistently'
++        PRINT*,'MODPK: solve this for you. Please adjust phi_init and try again.'
++        PRINT*,'MODPK: QUITTING'
++        STOP
++     END IF
++     IF(delp .GT. 0.1 .OR. dalpha .GT. 0.1 .OR. dh .GT. 0.1) THEN
++        PRINT*,'MODPK: The interpolation in SUBROUTINE EVOLVE has suspiciously large'
++        PRINT*,'MODPK: errors. Your model smells fishy.'
++        PRINT*,'MODPK: QUITTING'
++        STOP
++     ENDIF
++ 
++ 20  CONTINUE
++ 
++     y(1)=p_ik             !phi(x1)
++     y(2)=-dVdphi(p_ik)/3./h_ik/h_ik !dphi/dalpha(x1) slowroll approx
++     y(3)=1.               !u1(x1)
++     y(4)=0.               !du1/dalpha(x1)
++     y(5)=0.               !u2(x1)
++     y(6)=1.               !du2/dalpha(x2)
++     y(7)=1.               !v1(x1)
++     y(8)=0.               !dv1/dalpha(x1)
++     y(9)=0.               !v2(x1)
++     y(10)=1.              !dv2/dalpha(x2)
++     !     
++     !     Call the integrator 
++     !
++     ode_underflow=.FALSE.
++     ode_ps_output=.TRUE.
++     ode_infl_end=.FALSE.
++     save_steps=.FALSE. 
++     pk_bad=0
++     x2=Nefold_max !ending value 
++     h1=0.1 !guessed start stepsize
++     accuracy=5.0d-6 !has a big impact on the speed of the code
++     hmin=0.0 !minimum stepsize
++     CALL odeint(y,x1,x2,accuracy,h1,hmin,derivs,rkqs) 
++     IF(.NOT. ode_underflow) THEN 
++        pow=pow_ik
++        powt=powt_ik
++     ELSE
++        pow=0.
++        powt=0.
++        pk_bad=1
++     ENDIF
++ 
++     RETURN
++   END SUBROUTINE evolve
++ 
++ END MODULE access_modpk
+diff -rcBN cosmomc/camb/modpk_backgrnd.f90 modecode/camb/modpk_backgrnd.f90
+*** cosmomc/camb/modpk_backgrnd.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk_backgrnd.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,219 ----
++ MODULE background_evolution
++   USE camb_interface
++   USE modpkparams
++   USE modpk_odeint
++   USE ode_path
++   USE powersp
++   USE potential, ONLY : pot,getH, getHdot, dVdphi, getEps
++   USE modpk_utils, ONLY : locate, polint, bderivs, rkqs
++   IMPLICIT NONE
++   PUBLIC :: backgrnd
++ CONTAINS
++   SUBROUTINE backgrnd
++     INTEGER*4 :: i,j, rescl_count
++     DOUBLE PRECISION :: phi_init_trial
++     DOUBLE PRECISION :: alpha_e,dalpha,V_end,dv,dh,ep
++     DOUBLE PRECISION :: a_end, a_end_inst
++     DOUBLE PRECISION ::V_i, ph, H_pivot, alpha_pivot,aa,bb
++     DOUBLE PRECISION :: epsarr(nsteps),vv(nsteps)
++     DOUBLE PRECISION :: Np_last
++     !
++     !     Set initial conditions
++     !
++     !     y(1)=phi              dydx(1)=dphi/dx
++     !     y(2)=dphi/dx          dydx(1)=d^2phi/dx^2
++ 
++     phidot_sign = -(dVdphi(phi_init))/ABS(dVdphi(phi_init))
++ 
++     !if < 0 field rolls from large to small
++     !if > 0, the field rolls from small to large
++ 
++     !Check whether phi_infl_end is in the correct direction from phi_init
++     IF(.NOT.(slowroll_infl_end)) THEN
++        IF (phidot_sign .GT.0 .AND. phi_init.GE.phi_infl_end) THEN
++           PRINT*, 'MODPK: Initial phi is smaller than final phi.' 
++           PRINT*, 'MODPK: Please check your initial conditions'
++           PRINT*, 'MODPK: QUITTING'
++           STOP
++        ENDIF
++        IF (phidot_sign .LT.0 .AND. phi_init.LE.phi_infl_end) THEN
++           PRINT*, 'MODPK: Initial phi is larger than final phi.' 
++           PRINT*, 'MODPK: Please check your initial conditions'
++           PRINT*, 'MODPK: QUITTING'
++           STOP
++        ENDIF
++ 
++     ENDIF
++ 
++     !Try the background evolution for a user-defined phi_init and rescale if necessary
++     rescl_count=0
++     rescale_factor = 0.1d0
++ 
++     DO
++        phi_init_trial=phi_init
++        CALL trial_background(phi_init_trial, alpha_e, V_end)
++        IF ((pk_bad/=0) .OR. phi_init_trial.EQ.phi_init) EXIT
++        rescl_count=rescl_count+1
++        IF (rescl_count .EQ. 50) THEN
++           pk_bad=2
++           PRINT*,'MODPK: phi_init rescaling did not work after 50 tries.'
++           EXIT
++        END IF
++        PRINT*,'MODPK: Warning: Your phi_init was inconsistent. Rescaling.'
++        PRINT*,'MODPK: rescaled phi_init=',phi_init_trial
++        phi_init=phi_init_trial
++     END DO
++ 
++     IF(pk_bad==0) THEN
++        !Matching condition 
++        V_i=pot(phi_init)
++        IF (instreheat) THEN
++           a_init=EXP(-71.1d0-alpha_e+LOG(V_i/V_end)/4.d0+LOG((M_Pl**4)/V_i)/4.d0)
++           WRITE(*,*) 'a_end =',EXP(alpha_e)*a_init
++           Np_last = 0.5d0*N_pivot
++           do while (abs(N_pivot-Np_last)>0.01d0)
++              Np_last = N_pivot
++              alpha_pivot = alpha_e-N_pivot
++              i=locate(lna(1:nactual),alpha_pivot)
++              j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++              CALL polint(lna(j:j+4), hubarr(j:j+4), alpha_pivot, H_pivot, dh)
++              N_pivot = -71.1d0-log(V_end/(M_Pl**4))/4.d0-log(k_pivot*Mpc2Mpl/H_pivot)
++           end do
++           WRITE(*,*) 'N_e(pivot) =',N_pivot
++           WRITE(*,*) 'H_pivot=',H_pivot
++           WRITE(*,*) 'a_pivot =',EXP(alpha_pivot)*a_init
++        ELSE
++           alpha_pivot = alpha_e-N_pivot
++           i=locate(lna(1:nactual),alpha_pivot)
++           j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++           CALL polint(lna(j:j+4), hubarr(j:j+4), alpha_pivot, H_pivot, dh)
++           CALL polint(lna(j:j+4), phiarr(j:j+4), alpha_pivot, aa, bb)
++           a_init=k_pivot*Mpc2Mpl/H_pivot/EXP(alpha_pivot)
++           WRITE(*,*) 'alpha(pivot) =',alpha_pivot
++           WRITE(*,*) 'N_e(pivot) =',alpha_e-alpha_pivot
++           WRITE(*,*) 'phi(pivot)=', aa
++           WRITE(*,*) 'H_pivot=',H_pivot
++           WRITE(*,*) 'a_pivot =',EXP(alpha_pivot)*a_init
++           WRITE(*,*) 'a_end =',EXP(alpha_e)*a_init
++           a_end=EXP(alpha_e)*a_init
++           a_end_inst=EXP(-71.1d0+LOG(V_i/V_end)/4.d0+LOG((M_Pl**4)/V_i)/4.d0)
++           IF (a_end .GT. a_end_inst) THEN 
++              PRINT*,'MODPK: inflation ends too late with this N_pivot.'
++              pk_bad=3
++              RETURN
++           ENDIF
++        END IF
++        WRITE(*,*) 'a_init =', a_init
++ 
++        DO i=1,nactual
++           aharr(i)=LOG(a_init*EXP(lna(i))*hubarr(i))
++        END DO
++     ENDIF
++ 
++     RETURN
++   END SUBROUTINE backgrnd
++ 
++   SUBROUTINE trial_background(phi_init_trial, alpha_e, V_end)
++     INTEGER*4 :: i,j
++     INTEGER*4, PARAMETER :: BNVAR=2
++     DOUBLE PRECISION :: accuracy,h1,hmin,x1,x2
++     DOUBLE PRECISION :: alpha_e,dalpha,V_end,dv,ep, phi_init_trial
++     DOUBLE PRECISION :: ph, H_pivot, alpha_pivot,aa,bb
++     DOUBLE PRECISION :: epsarr(nsteps),vv(nsteps)
++     DOUBLE PRECISION, DIMENSION(BNVAR) :: y 
++ 
++ 
++     h_init=SQRT(pot(phi_init_trial)/6./M_Pl/M_Pl*(1.+SQRT(1.+2./3.* &
++          &     (M_Pl*dVdphi(phi_init_trial)/pot(phi_init_trial))**2.)))
++     x1=0.0 !starting value
++     x2=Nefold_max !ending value
++     y(1)=phi_init_trial  !phi(x1)
++     y(2)=-dVdphi(phi_init_trial)/3./h_init/h_init !dphi/dalpha(x1) slowroll approx
++     !     
++     !     Call the integrator
++     !
++     ode_underflow=.FALSE.
++     ode_ps_output=.FALSE.
++     ode_infl_end=.TRUE.
++     save_steps=.TRUE. 
++     pk_bad=0
++ 
++     IF(getEps(y(1),y(2)) .GT. 1.) THEN
++        slowroll_start=.FALSE.
++     ELSE
++        slowroll_start=.TRUE.
++     ENDIF
++ 
++     !guessed start stepsize
++     if (potential_choice.eq.6) then
++        h1 = 0.001
++     else
++        h1 = 0.1
++     end if
++     dxsav=1.d-7
++     accuracy=1.0d-7
++     hmin=0.0 !minimum stepsize
++     CALL odeint(y,x1,x2,accuracy,h1,hmin,bderivs,rkqs) 
++ 
++     IF(.NOT. ode_underflow) THEN    
++        lna(1:kount)=xp(1:kount)
++        phiarr(1:kount)=yp(1,1:kount)
++        dphiarr(1:kount)=yp(2,1:kount)
++        DO i=1,kount
++           vv(i)=pot(phiarr(i))
++           hubarr(i)=getH(phiarr(i),dphiarr(i))
++           epsarr(i) = getEps(phiarr(i),dphiarr(i)) 
++        END DO
++        !
++        !     Determine the parameters needed for converting k(Mpc^-1) to K
++        !      
++        nactual=kount
++        IF(slowroll_infl_end) THEN
++           ep=1.d0
++           i=locate(epsarr(1:kount),ep)
++           j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++           CALL polint(epsarr(j:j+4), lna(j:j+4), ep, alpha_e, dalpha)
++           CALL polint(epsarr(j:j+4), vv(j:j+4), ep, V_end, dv)
++           CALL polint(epsarr(j:j+4), phiarr(j:j+4), ep, phi_infl_end, bb)
++        ELSE
++           ep=phi_infl_end
++           i=locate(phiarr(1:kount),ep)
++           j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++           CALL polint(phiarr(j:j+4), lna(j:j+4), ep, alpha_e, dalpha)
++           CALL polint(phiarr(j:j+4), vv(j:j+4), ep, V_end, dv)
++        ENDIF
++        WRITE(*,*) 'phi(N_end)=', phi_infl_end
++ 
++        IF (instreheat) THEN
++           !Set a plausible pivot (ignoring logarithmic V_k and V_end terms) for 
++           !the smallest k likely to be requested by CAMB. 
++           N_pivot=-LOG10(1.d-6)+60.
++        ENDIF
++ 
++        IF(alpha_e.LT.(N_pivot+20.)) THEN
++           IF ((potential_choice.eq.6).and.(vparams(1)<-2.d0)) THEN
++              phi_init_trial = phi_init*0.9d0
++           ELSE
++              phi_init_trial=phi_init+(phi_init-phi_infl_end)*rescale_factor
++           ENDIF
++           RETURN
++        END IF
++ 
++        IF (alpha_e.GT.N_pivot+55) THEN
++           ep=alpha_e-(N_pivot+50)
++           i=locate(lna(1:kount),ep)
++           j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++           CALL polint(lna(j:j+4), phiarr(j:j+4), ep, aa, bb)
++           phi_init_trial=aa
++           RETURN
++        END IF
++ 
++     ELSE
++        pk_bad=4
++     ENDIF
++ 
++     RETURN
++   END SUBROUTINE TRIAL_BACKGROUND
++ 
++ 
++ END MODULE BACKGROUND_EVOLUTION
+diff -rcBN cosmomc/camb/modpk_modules.f90 modecode/camb/modpk_modules.f90
+*** cosmomc/camb/modpk_modules.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk_modules.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,63 ----
++ MODULE camb_interface
++   INTEGER :: pk_bad
++   LOGICAL :: pk_initialized
++ END MODULE camb_interface
++ 
++ MODULE ode_path
++   INTEGER*4 :: nok,nbad,kount
++   LOGICAL, SAVE :: save_steps=.false.
++   LOGICAL :: ode_underflow
++   LOGICAL :: ode_ps_output
++   LOGICAL :: ode_infl_end
++   LOGICAL :: infl_ended
++   DOUBLE PRECISION :: dxsav
++   DOUBLE PRECISION, DIMENSION(:), POINTER :: xp
++   DOUBLE PRECISION, DIMENSION(:,:), POINTER :: yp
++ END MODULE ode_path
++ 
++ MODULE modpkparams
++   IMPLICIT NONE
++ 
++   LOGICAL :: use_modpk, vnderivs, instreheat
++ 
++ ! increase max_vparams to use more potential parameters
++   INTEGER*4, parameter :: max_vparams = 9
++ 
++   INTEGER :: vparams_num
++   INTEGER :: potential_choice
++   DOUBLE PRECISION :: vparams(max_vparams)
++ 
++   INTEGER*4 :: nactual
++   INTEGER*4, PARAMETER :: nsteps=10000
++   DOUBLE PRECISION, PARAMETER :: M_Pl=1.0d0
++   DOUBLE PRECISION, PARAMETER :: Mpc2Mpl=2.6245d-57
++   DOUBLE PRECISION :: k_pivot, N_pivot
++   DOUBLE PRECISION :: a_init
++   DOUBLE PRECISION :: phi_init0,phi_init,h_init,rescale_factor
++   DOUBLE PRECISION :: phidot_sign
++   DOUBLE PRECISION :: Nefold_max=10000.
++   DOUBLE PRECISION :: lna(nsteps),phiarr(nsteps),dphiarr(nsteps)
++   DOUBLE PRECISION :: hubarr(nsteps),aharr(nsteps)
++   LOGICAL :: slowroll_infl_end
++   LOGICAL :: slowroll_start=.false.
++   DOUBLE PRECISION :: phi_infl_end=0.
++   DOUBLE PRECISION :: findiffdphi
++ 
++   DOUBLE PRECISION :: modpk_ns, modpk_nt, modpk_nrun, modpk_As, modpk_r
++ 
++ END MODULE modpkparams
++ 
++ 
++ MODULE internals
++   IMPLICIT NONE
++   REAL, PARAMETER :: PI=3.141592653589793238462643383279502884197
++   DOUBLE PRECISION :: h_ik,pow_ik,powt_ik
++   DOUBLE PRECISION :: k, a_ik
++ END MODULE internals
++ 
++ 
++ MODULE powersp
++   IMPLICIT NONE
++   INTEGER*4 :: ik
++   DOUBLE PRECISION :: eval_ps,k_start
++ END MODULE powersp
+diff -rcBN cosmomc/camb/modpk_odeint.f90 modecode/camb/modpk_odeint.f90
+*** cosmomc/camb/modpk_odeint.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk_odeint.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,158 ----
++ module modpk_odeint
++   IMPLICIT NONE
++   CONTAINS
++ 
++ SUBROUTINE odeint(ystart,x1,x2,eps,h1,hmin,derivs,rkqs)
++   USE ode_path
++   USE internals
++   USE powersp
++   USE modpkparams
++   USE potential
++   USE modpk_utils, only : reallocate_rv, reallocate_rm
++ 
++   IMPLICIT NONE
++   DOUBLE PRECISION, DIMENSION(:), INTENT(INOUT) :: ystart
++   DOUBLE PRECISION, INTENT(IN) :: x1,x2,eps,h1,hmin
++   INTERFACE
++      SUBROUTINE derivs(x,y,dydx)
++        IMPLICIT NONE
++        DOUBLE PRECISION, INTENT(IN) :: x
++        DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++        DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: dydx
++      END SUBROUTINE derivs
++ 
++      SUBROUTINE rkqs(y,dydx,x,htry,eps,yscal,hdid,hnext,derivs)
++        IMPLICIT NONE
++        DOUBLE PRECISION, DIMENSION(:), INTENT(INOUT) :: y
++        DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: dydx,yscal
++        DOUBLE PRECISION, INTENT(INOUT) :: x
++        DOUBLE PRECISION, INTENT(IN) :: htry,eps
++        DOUBLE PRECISION, INTENT(OUT) :: hdid,hnext
++        INTERFACE
++           SUBROUTINE derivs(x,y,dydx)
++             IMPLICIT NONE
++             DOUBLE PRECISION, INTENT(IN) :: x
++             DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++             DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: dydx
++           END SUBROUTINE derivs
++        END INTERFACE
++      END SUBROUTINE rkqs
++   END INTERFACE
++   DOUBLE PRECISION, PARAMETER :: TINY=1.0d-30
++   INTEGER*4, PARAMETER :: MAXSTP=10000
++   INTEGER*4 :: nstp,i
++   DOUBLE PRECISION :: h,hdid,hnext,x,xsav
++   DOUBLE PRECISION, DIMENSION(SIZE(ystart)) :: dydx,y,yscal
++   DOUBLE PRECISION :: z, scalefac
++   ode_underflow=.FALSE.
++   infl_ended=.FALSE.
++   x=x1
++   h=SIGN(h1,x2-x1)
++   nok=0
++   nbad=0
++   kount=0
++   y(:)=ystart(:)
++   NULLIFY(xp,yp)
++   IF (save_steps) THEN
++      xsav=x-2.d0*dxsav
++      ALLOCATE(xp(256))
++      ALLOCATE(yp(SIZE(ystart),SIZE(xp)))
++   END IF
++   DO nstp=1,MAXSTP
++      CALL derivs(x,y,dydx)
++      yscal(:)=ABS(y(:))+ABS(h*dydx(:))+TINY
++      IF (save_steps .AND. (ABS(x-xsav) > ABS(dxsav))) &
++           CALL save_a_step
++      IF ((x+h-x2)*(x+h-x1) > 0.0) h=x2-x
++      CALL rkqs(y,dydx,x,h,eps,yscal,hdid,hnext,derivs)
++      IF (hdid == h) THEN
++         nok=nok+1
++      ELSE
++         nbad=nbad+1
++      END IF
++ 
++ 
++      IF ((x-x2)*(x2-x1) >= 0.0) THEN
++         PRINT*,'MODPK: This could be a model for which inflation does not end.'
++         PRINT*,'MODPK: Either adjust phi_init or use slowroll_infl_end for a potential'
++         PRINT*,'MODPK: for which inflation does not end by breakdown of slowroll.'
++         PRINT*,'MODPK: QUITTING'
++         write(*,*) 'vparams: ', (vparams(i),i=1,max_vparams)
++         if (.not.instreheat) write(*,*) 'N_pivot: ', N_pivot
++         STOP       
++         RETURN
++      END IF
++      
++      IF(getEps(y(1),y(2)) .LT. 1 .AND. .NOT.(slowroll_start)) slowroll_start=.true.
++ 
++      IF(ode_infl_end) THEN 
++         IF (slowroll_infl_end) THEN
++            IF(getEps(y(1),y(2)) .GT. 2 .AND. slowroll_start) THEN 
++               infl_ended=.TRUE.
++               ystart(:)=y(:)
++               IF (save_steps) CALL save_a_step
++               RETURN
++            ENDIF
++         ELSE
++            IF(getEps(y(1),y(2)) .GT. 1 .AND. slowroll_start) THEN
++               print*,getEps(y(1),y(2))
++               PRINT*,'MODPK: You asked for a no-slowroll-breakdown model, but inflation'
++               PRINT*,'MODPK: already ended via slowroll violation before your phi_end was'
++               PRINT*,'MODPK: reached. Please take another look at your inputs.'
++               PRINT*,'MODPK: QUITTING'
++               STOP
++            ENDIF
++               
++            IF (phidot_sign.GT.0..AND.(y(1).GT.(phi_infl_end+0.05))) THEN
++               infl_ended=.TRUE.
++               ystart(:)=y(:)
++               IF (save_steps) CALL save_a_step
++               RETURN
++            ENDIF
++            IF (phidot_sign.LT.0..AND.(y(1).LT.(phi_infl_end-0.05))) THEN
++               infl_ended=.TRUE.
++               ystart(:)=y(:)
++               IF (save_steps) CALL save_a_step
++               RETURN
++            ENDIF
++ 
++         ENDIF
++      ENDIF
++ 
++      IF(ode_ps_output) THEN 
++         IF(k.LT.a_init*EXP(x)*getH(y(1),y(2))/eval_ps) THEN !k<aH/eval_ps
++            z=a_init*EXP(x)*y(2) ! z=a*phi_dot/H=a*dphi/dalpha
++            scalefac=a_init*EXP(x)
++            pow_ik=powerspectrum(y(3),y(5),z) !Calculate scalar power at this k
++            powt_ik=tensorpower(y(7),y(9),scalefac) !Calculate tensor power at this k
++            ystart(:)=y(:)
++            IF (save_steps) CALL save_a_step
++            RETURN
++         END IF
++      END IF
++ 
++      IF (ode_underflow) RETURN
++      IF (ABS(hnext) < hmin) THEN
++         write(*,*) 'stepsize smaller than minimum in odeint'
++         STOP
++      END IF
++      h=hnext
++   END DO
++   PRINT*,'too many steps in odeint'
++   ode_underflow=.TRUE.
++ CONTAINS
++   SUBROUTINE save_a_step
++     kount=kount+1
++     IF (kount > SIZE(xp)) THEN
++        xp=>reallocate_rv(xp,2*SIZE(xp))
++        yp=>reallocate_rm(yp,SIZE(yp,1),SIZE(xp))
++     END IF
++     xp(kount)=x
++     yp(:,kount)=y(:)
++     xsav=x
++   END SUBROUTINE save_a_step
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++ END SUBROUTINE odeint
++ 
++ end module modpk_odeint
++ 
+diff -rcBN cosmomc/camb/modpk_potential.f90 modecode/camb/modpk_potential.f90
+*** cosmomc/camb/modpk_potential.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk_potential.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,273 ----
++ MODULE potential
++   USE modpkparams
++   IMPLICIT NONE
++   PRIVATE
++   PUBLIC :: pot, getH, getHdot, getEps, dVdphi, d2Vdphi2, getdepsdalpha, powerspectrum, &
++        tensorpower, initialphi
++ 
++ CONTAINS
++ 
++   FUNCTION MySech(x)
++     DOUBLE PRECISION  :: x,MySech
++ 
++     IF(ABS(x).GT.40.0) THEN
++        MySech=0.0
++     ELSE
++        MySech=1.0/COSH(x)
++     END IF
++     RETURN
++   END FUNCTION MySech
++ 
++   FUNCTION pot(phi)
++     !
++     !     Returns V(phi) given phi
++     !
++     DOUBLE PRECISION :: pot,phi
++     DOUBLE PRECISION :: mu, lambda, m_V, finv
++ 
++     select case(potential_choice)
++     case(1)
++        m_V = 10.d0**(0.5d0*vparams(1))
++        pot = 0.5*m_V*m_V*phi*phi
++     case(2)
++        lambda = 10.d0**vparams(1)
++        finv = 1.d0/(10.d0**vparams(2))
++        pot = lambda**4*(1.d0+cos(finv*phi))
++     case(3)
++        lambda = 10.d0**vparams(1)
++        pot = 0.25*lambda*phi**4
++     case(4)
++        lambda = 10.d0**vparams(1)
++        pot = lambda*phi
++     case(5)
++        lambda = 10.d0**vparams(1)
++        pot = lambda*1.5d0*phi**(2./3.)
++     case(6)
++        lambda = 10.d0**vparams(1)
++        mu = 10.d0**vparams(2)
++        pot = lambda**4 - mu*phi**4/4.d0
++     case default
++        write(*,*) 'MODPK: Need to set pot(phi) in modpk_potential.f90 for potential_choice =',potential_choice
++        STOP
++     end select
++ 
++     RETURN
++   END FUNCTION pot
++ 
++ 
++   FUNCTION dVdphi(phi)
++     !
++     !     Returns dV/dPhi given phi
++     !
++     DOUBLE PRECISION :: phi,dVdPhi,dphi,phiplus
++     DOUBLE PRECISION :: m_V, lambda, finv, mu
++ 
++     if (vnderivs) then
++           phiplus = phi + 0.5*phi*findiffdphi**(1./3.)
++           dphi = phiplus - phi
++           dVdphi = (pot(phi+dphi)-pot(phi-dphi))/(2.*dphi)
++           if (dVdphi.eq.0.d0) then
++              write(*,*) 'MODPK: dVdphi=0, possibly signaling a problem with accuracy of numerical derivatives.'
++              write(*,*) 'MODPK: Try using vnderivs=F if possible.'
++              STOP
++           end if
++     else
++        select case(potential_choice)
++        case(1)
++           m_V = 10.d0**(0.5d0*vparams(1))
++           dVdphi = m_V*m_V*phi
++        case(2)
++           lambda = 10.d0**vparams(1)
++           finv = 1.d0/(10.d0**vparams(2))
++           dVdphi = -lambda**4*finv*sin(finv*phi)
++        case(3)
++           lambda = 10.d0**vparams(1)
++           dVdphi = lambda*phi**3
++        case(4)
++           lambda = 10.d0**vparams(1)
++           dVdphi = lambda
++        case(5)
++           lambda = 10.d0**vparams(1)
++           dVdphi = lambda*phi**(-1./3.)
++        case(6)
++           mu = 10.d0**vparams(2)
++           dVdphi = -mu*phi**3
++        case default
++           write(*,*) 'MODPK: Need to set dVdphi in modpk_potential.f90 or use numerical derivatives (vnderivs=T)'
++           STOP
++        end select
++ 
++     end if
++ 
++     RETURN
++   END FUNCTION dVdphi
++ 
++ 
++   FUNCTION d2Vdphi2(phi)
++     !
++     !     Returns d^2V/dPhi^2 given phi
++     !
++     DOUBLE PRECISION :: phi,d2VdPhi2,dphi,phiplus
++     DOUBLE PRECISION :: m_V, lambda, finv, mu
++ 
++     if (vnderivs) then
++        phiplus = phi + 0.2*phi*findiffdphi**(1./4.)
++        dphi = phiplus - phi
++        d2Vdphi2 = (pot(phi+2.*dphi)+pot(phi-2.*dphi)-2.*pot(phi))/(4.*dphi*dphi)
++     else
++        select case(potential_choice)
++        case(1)
++           m_V = 10.d0**(0.5d0*vparams(1))
++           d2Vdphi2 = m_V*m_V
++        case(2)
++           lambda = 10.d0**vparams(1)
++           finv = 1.d0/(10.d0**vparams(2))
++           d2Vdphi2 = -lambda**4*finv*finv*cos(finv*phi)
++        case(3)
++           lambda = 10.d0**vparams(1)
++           d2Vdphi2 = 3.d0*lambda*phi*phi
++        case(4)
++           d2Vdphi2 = 0.d0
++        case(5)
++           lambda = 10.d0**vparams(1)
++           d2Vdphi2 = -lambda/3.d0*phi**(-4./3.)
++        case(6)
++           mu = 10.d0**vparams(2)
++           d2Vdphi2 = -3.d0*mu*phi*phi
++        case default
++           write(*,*) 'MODPK: Need to set d2Vdphi2 in modpk_potential.f90 or use numerical derivatives (vnderivs=T)'
++           STOP
++        end select
++ 
++     end if
++ 
++     RETURN
++   END FUNCTION d2Vdphi2
++ 
++ 
++   FUNCTION initialphi(phi0)
++     !
++     !     Sets initial value of phi (depending on potential, may use
++     !     either the user-specified value phi0 or something derived 
++     !     from the potential parameters)
++     !
++     DOUBLE PRECISION :: initialphi, phi0
++     DOUBLE PRECISION :: phii, Ninit, finv, lambda, mu, phesq
++     DOUBLE PRECISION :: x1, x2
++ 
++     Ninit = 70.d0
++ 
++     select case(potential_choice)
++     case(1)
++        phii = 2.d0*sqrt(Ninit+0.5d0)
++     case(2)
++        finv = 1.d0/(10.d0**vparams(2))
++        phii = 2.d0/finv*asin(exp(-0.5d0*Ninit*finv*finv)/ &
++             sqrt(1.d0+0.5d0*finv*finv))
++     case(3)
++        phii = sqrt(8.d0*(Ninit+1.d0))
++     case(4)
++        phii = sqrt(2.d0*Ninit+0.5d0)
++     case(5)
++        phii = sqrt(4.d0/3.d0*Ninit+2.d0/9.d0)
++     case(6)
++        lambda = 10.d0**vparams(1)
++        mu = 10.d0**vparams(2)
++        x1 = lambda**4/mu
++        phesq = ((sqrt(2.d0)*x1)**(-4./3.)+1.d0/(4.d0*x1))**(-0.5)
++        if (vparams(1)<-3.d0) then
++           phii = sqrt(phesq/(2.d0**1.5*Ninit/sqrt(phesq)+1.d0))
++        else
++           x2 = 4.d0*Ninit + 2.d0*x1/phesq + 0.5d0*phesq
++           phii = sqrt(x2)*sqrt(1.d0-sqrt(1.d0-4.d0*x1/x2/x2))
++        end if
++     case default
++        phii = phi0
++     end select
++ 
++     write(*,*) 'initial value of phi =', phii
++     initialphi = phii
++ 
++     RETURN
++   END FUNCTION initialphi
++ 
++ 
++   FUNCTION getEps(phi,dphi)
++     !
++     !     Returns epsilon given phi and dphi/dalpha
++     !     slowroll parameter epsilon_H = 2 M_pl^2 [(dH/dphi)/H]^2
++     !
++     DOUBLE PRECISION :: getEps,phi,dphi
++     getEps=2.d0*(M_Pl**2)*(((getHdot(phi,dphi)/dphi)/getH(phi,dphi))**2)
++     RETURN
++ 
++   END FUNCTION getEps
++ 
++ 
++   FUNCTION getH(phi,dphi)
++     !
++     !     Returns H given phi and dphi/dalpha
++     !
++     DOUBLE PRECISION :: getH,phi,dphi
++ 
++     getH=SQRT(pot(phi)/3./M_Pl/M_Pl/ &
++          &     (1.0-dphi*dphi/6.0/M_Pl/M_Pl))
++     RETURN
++   END FUNCTION getH
++ 
++ 
++   FUNCTION getHdot(phi,dphi)
++     !
++     !     Returns dH/dalpha given phi and dphi/dalpha
++     !
++     DOUBLE PRECISION :: getHdot,phi,dphi
++ 
++     getHdot=-dphi*dphi*getH(phi,dphi)/2./M_Pl/M_Pl
++     RETURN
++   END FUNCTION getHdot
++ 
++ 
++   FUNCTION getdepsdalpha(phi,dphi)
++     !
++     !    Returns depsilon/dalpha given phi and dphi/dalpha
++     !    Gets this by differentiating Peiris et al Eq A3 (2003)
++     !
++     DOUBLE PRECISION :: getdepsdalpha,phi,dphi,H,dHdalpha,eps
++     
++     H=getH(phi,dphi)
++     dHdalpha=getHdot(phi,dphi)
++     eps=getEps(phi,dphi)
++     getdepsdalpha=3./H*(2.*H*dHdalpha*(1.-eps/3.)-dVdphi(phi)*dphi/3./M_Pl/M_Pl)
++     RETURN
++   END FUNCTION getdepsdalpha
++ 
++   
++   FUNCTION powerspectrum(u1,u2,z)
++     USE internals
++     DOUBLE PRECISION :: powerspectrum,u1,u2
++     DOUBLE PRECISION :: z
++     !
++     !     Calculates P_R(k) given u1, u2, z
++     !
++     powerspectrum = (u1*u1/(2.0*k)+ &
++          &           u2*u2*k/2.0/(h_ik*a_ik)**2) &
++          &           /z**2 &
++          &           *(k**3)/2./PI**2
++     RETURN
++   END FUNCTION powerspectrum
++ 
++ 
++   FUNCTION tensorpower(v1,v2,a)
++     USE internals
++     DOUBLE PRECISION :: tensorpower,v1,v2,a
++     !
++     !     Calculates P_h(k) given v1, v2
++     !
++     tensorpower = (v1*v1/(2.0*k)+ &
++          &           v2*v2*k/2.0/(h_ik*a_ik)**2) &
++          &           /a**2 &
++          &           *(k**3)*4./PI**2/(M_Pl**2)
++     RETURN
++   END FUNCTION tensorpower
++ 
++ END MODULE potential
+diff -rcBN cosmomc/camb/modpk_utils.f90 modecode/camb/modpk_utils.f90
+*** cosmomc/camb/modpk_utils.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/modpk_utils.f90	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,320 ----
++ MODULE modpk_utils
++   IMPLICIT NONE
++ 
++ CONTAINS
++ 
++   SUBROUTINE bderivs(x,y,yprime)
++     USE modpkparams
++     USE potential, ONLY: pot,dVdphi,d2Vdphi2,getH,getHdot
++     USE camb_interface, ONLY : pk_bad
++     DOUBLE PRECISION, INTENT(IN) :: x
++     DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++     DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: yprime
++     DOUBLE PRECISION :: p,delp,ddp,hubble,dhubble
++     DOUBLE PRECISION :: a,u1,du1,u2,du2
++     integer :: i
++     !
++     !     x=alpha
++     !     y(1)=phi              dydx(1)=dphi/dalpha
++     !     y(2)=dphi/dalpha      dydx(2)=d^2phi/dalpha^2
++     !  
++     p=y(1)
++     delp=y(2)
++     IF(ABS(delp).GT.SQRT(6.0)) THEN
++        WRITE(*,*) 'MODPK: H is imaginary:',x,p,delp
++        !In the case of the hilltop potential, the integrator
++        !in a trial step can go here very occasionally because
++        !the trial step is too large and it has come too close to V=0.
++        !We will stop it going this way, and the code will find the
++        !correct epsilon=1 point which has, by definition, to be
++        !before this problematic region is reached.
++        IF(potential_choice.eq.6) THEN
++           yprime(1)=0.0d0
++           yprime(2)=0.0d0
++           RETURN
++        ENDIF
++        WRITE(*,*) 'MODPK: QUITTING'
++        write(*,*) 'vparams: ', (vparams(i),i=1,max_vparams)
++        if (.not.instreheat) write(*,*) 'N_pivot: ', N_pivot
++        STOP
++     END IF
++     hubble=getH(p,delp)
++     dhubble=getHdot(p,delp)
++     yprime(1)=delp
++     yprime(2)=-((3.0+dhubble/hubble)*delp+dVdphi(p)/hubble/hubble)
++     RETURN
++   END SUBROUTINE bderivs 
++ 
++ 
++   SUBROUTINE derivs(x,y,yprime)
++     USE modpkparams
++     USE internals
++     USE potential, ONLY: pot,dVdphi,d2Vdphi2,getH,getHdot
++     IMPLICIT NONE
++     DOUBLE PRECISION, INTENT(IN) :: x
++     DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++     DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: yprime
++     DOUBLE PRECISION :: p,delp,ddp,hubble,dhubble
++     DOUBLE PRECISION :: a,u1,du1,u2,du2,v1,dv1,v2,dv2
++     integer :: i
++     !
++     !     x=alpha
++     !     y(1)=phi              dydx(1)=dphi/dalpha
++     !     y(2)=dphi/dalpha      dydx(2)=d^2phi/dalpha^2
++     !     y(3)=u1               dydx(3)=du1/dalpha
++     !     y(4)=du1/dalpha       dydx(4)=d^2u1/dalpha^2
++     !     y(5)=u2               dydx(5)=du2/dalpha
++     !     y(6)=du2/dalpha       dydx(6)=d^2u2/dalpha^2
++     !     y(7)=v1               dydx(7)=dv1/dalpha
++     !     y(8)=dv1/dalpha       dydx(8)=d^2v1/dalpha^2
++     !     y(9)=v2               dydx(9)=dv2/dalpha
++     !     y(10)=dv2/dalpha      dydx(10)=d^2v2/dalpha^2
++     !
++     p=y(1)
++     delp=y(2)
++     IF(ABS(delp).GT.SQRT(6.)) THEN
++        WRITE(*,*) 'MODPK: H is imaginary:',x,p,delp
++        WRITE(*,*) 'MODPK: QUITTING'
++        write(*,*) 'vparams: ', (vparams(i),i=1,max_vparams)
++        if (.not.instreheat) write(*,*) 'N_pivot: ', N_pivot
++        STOP
++     END IF
++     hubble=getH(p,delp)
++     dhubble=getHdot(p,delp)
++     a=EXP(x)
++     u1=y(3)
++     du1=y(4)
++     u2=y(5)
++     du2=y(6)
++     v1=y(7)
++     dv1=y(8)
++     v2=y(9)
++     dv2=y(10)
++     yprime(1)=delp
++     yprime(2)=-((3.0+dhubble/hubble)*delp+dVdphi(p)/hubble/hubble)
++     ddp=yprime(2)
++     yprime(3)=du1
++     yprime(4)=-((dhubble/hubble+1.)*du1 + ((k/a_init/a/hubble)**2. &
++          &     +(-2.0 + 5.*dhubble/hubble + d2Vdphi2(p)/hubble/hubble &
++          &     + 2.*(dhubble/hubble)**2. + 4*(dhubble/hubble)*ddp/delp))*u1)
++     yprime(5)=du2
++     yprime(6)=-((dhubble/hubble+1.)*du2 + ((k/a_init/a/hubble)**2. &
++          &     +(-2.0 + 5.*dhubble/hubble + d2Vdphi2(p)/hubble/hubble &
++          &     + 2.*(dhubble/hubble)**2. + 4*(dhubble/hubble)*ddp/delp))*u2)
++     yprime(7)=dv1
++     yprime(8)=-((dhubble/hubble+1.)*dv1 + ((k/a_init/a/hubble)**2. &
++          &     -(dhubble/hubble+2.))*v1)
++     yprime(9)=dv2
++     yprime(10)=-((dhubble/hubble+1.)*dv2 + ((k/a_init/a/hubble)**2. &
++          &     -(dhubble/hubble+2.))*v2)
++ 
++     RETURN
++   END SUBROUTINE derivs
++ 
++ 
++   SUBROUTINE rkqs(y,dydx,x,htry,eps,yscal,hdid,hnext,derivs)
++         USE ode_path
++ 	IMPLICIT NONE
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(INOUT) :: y
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: dydx,yscal
++ 	DOUBLE PRECISION, INTENT(INOUT) :: x
++ 	DOUBLE PRECISION, INTENT(IN) :: htry,eps
++ 	DOUBLE PRECISION, INTENT(OUT) :: hdid,hnext
++ 	INTERFACE
++ 		SUBROUTINE derivs(x,y,dydx)
++ 		IMPLICIT NONE
++ 		DOUBLE PRECISION, INTENT(IN) :: x
++ 		DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++ 		DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: dydx
++ 		END SUBROUTINE derivs
++ 	END INTERFACE
++ 	INTEGER*4 :: ndum
++ 	DOUBLE PRECISION :: errmax,h,htemp,xnew
++ 	DOUBLE PRECISION, DIMENSION(size(y)) :: yerr,ytemp
++ 	DOUBLE PRECISION, PARAMETER :: SAFETY=0.9d0,PGROW=-0.2d0,PSHRNK=-0.25d0,&
++ 		ERRCON=1.89e-4
++         if (size(y)==size(dydx) .and. size(dydx)==size(yscal)) then
++            ndum = size(y)
++         else
++            write(*,*) 'Wrong array sizes in rkqs'
++            stop
++         end if
++ 	h=htry
++ 	do
++ 		call rkck(y,dydx,x,h,ytemp,yerr,derivs)
++ 		errmax=maxval(abs(yerr(:)/yscal(:)))/eps
++ 		if (errmax <= 1.0) exit
++ 		htemp=SAFETY*h*(errmax**PSHRNK)
++ 		h=sign(max(abs(htemp),0.1d0*abs(h)),h)
++ 		xnew=x+h
++ 		if (xnew == x) then 
++                    print*, 'stepsize underflow in rkqs'
++                    ode_underflow = .true.
++                    return
++                 endif
++ 	end do
++ 	if (errmax > ERRCON) then
++ 		hnext=SAFETY*h*(errmax**PGROW)
++ 	else
++ 		hnext=5.0d0*h
++ 	end if
++ 	hdid=h
++ 	x=x+h
++ 	y(:)=ytemp(:)
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++ 	END SUBROUTINE rkqs
++ 
++ 	SUBROUTINE rkck(y,dydx,x,h,yout,yerr,derivs)
++ 	IMPLICIT NONE
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y,dydx
++ 	DOUBLE PRECISION, INTENT(IN) :: x,h
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: yout,yerr
++ 	INTERFACE
++ 		SUBROUTINE derivs(x,y,dydx)
++ 		IMPLICIT NONE
++ 		DOUBLE PRECISION, INTENT(IN) :: x
++ 		DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: y
++ 		DOUBLE PRECISION, DIMENSION(:), INTENT(OUT) :: dydx
++ 		END SUBROUTINE derivs
++ 	END INTERFACE
++ 	INTEGER*4 :: ndum
++ 	DOUBLE PRECISION, DIMENSION(size(y)) :: ak2,ak3,ak4,ak5,ak6,ytemp
++ 	DOUBLE PRECISION, PARAMETER :: A2=0.2d0,A3=0.3d0,A4=0.6d0,A5=1.0d0,&
++ 		A6=0.875d0,B21=0.2d0,B31=3.0d0/40.0d0,B32=9.0d0/40.0d0,&
++ 		B41=0.3d0,B42=-0.9d0,B43=1.2d0,B51=-11.0d0/54.0d0,&
++ 		B52=2.5d0,B53=-70.0d0/27.0d0,B54=35.0d0/27.0d0,&
++ 		B61=1631.0d0/55296.0d0,B62=175.0d0/512.0d0,&
++ 		B63=575.0d0/13824.0d0,B64=44275.0d0/110592.0d0,&
++ 		B65=253.0d0/4096.0d0,C1=37.0d0/378.0d0,&
++ 		C3=250.0d0/621.0d0,C4=125.0d0/594.0d0,&
++ 		C6=512.0d0/1771.0d0,DC1=C1-2825.0d0/27648.0d0,&
++ 		DC3=C3-18575.0d0/48384.0d0,DC4=C4-13525.0d0/55296.0d0,&
++ 		DC5=-277.0d0/14336.0d0,DC6=C6-0.25d0
++         if (size(y)==size(dydx) .and. size(dydx)==size(yout) .and. size(yout)==size(yerr)) then
++            ndum = size(y)
++         else
++            write(*,*) 'Wrong array sizes in rkck'
++            stop
++         end if
++ 	ytemp=y+B21*h*dydx
++ 	call derivs(x+A2*h,ytemp,ak2)
++ 	ytemp=y+h*(B31*dydx+B32*ak2)
++ 	call derivs(x+A3*h,ytemp,ak3)
++ 	ytemp=y+h*(B41*dydx+B42*ak2+B43*ak3)
++ 	call derivs(x+A4*h,ytemp,ak4)
++ 	ytemp=y+h*(B51*dydx+B52*ak2+B53*ak3+B54*ak4)
++ 	call derivs(x+A5*h,ytemp,ak5)
++ 	ytemp=y+h*(B61*dydx+B62*ak2+B63*ak3+B64*ak4+B65*ak5)
++ 	call derivs(x+A6*h,ytemp,ak6)
++ 	yout=y+h*(C1*dydx+C3*ak3+C4*ak4+C6*ak6)
++ 	yerr=h*(DC1*dydx+DC3*ak3+DC4*ak4+DC5*ak5+DC6*ak6)
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++       END SUBROUTINE rkck
++ 
++       FUNCTION locate(xx,x)
++ 	IMPLICIT NONE
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: xx
++ 	DOUBLE PRECISION, INTENT(IN) :: x
++ 	INTEGER*4 :: locate
++ 	INTEGER*4 :: n,jl,jm,ju
++ 	LOGICAL :: ascnd
++ 	n=size(xx)
++ 	ascnd = (xx(n) >= xx(1))
++ 	jl=0
++ 	ju=n+1
++ 	do
++ 		if (ju-jl <= 1) exit
++ 		jm=(ju+jl)/2
++ 		if (ascnd .eqv. (x >= xx(jm))) then
++ 			jl=jm
++ 		else
++ 			ju=jm
++ 		end if
++ 	end do
++ 	if (x == xx(1)) then
++ 		locate=1
++ 	else if (x == xx(n)) then
++ 		locate=n-1
++ 	else
++ 		locate=jl
++ 	end if
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++       END FUNCTION locate
++ 
++       SUBROUTINE polint(xa,ya,x,y,dy)
++ 	IMPLICIT NONE
++ 	DOUBLE PRECISION, DIMENSION(:), INTENT(IN) :: xa,ya
++ 	DOUBLE PRECISION, INTENT(IN) :: x
++ 	DOUBLE PRECISION, INTENT(OUT) :: y,dy
++ 	INTEGER*4 :: m,n,ns
++         INTEGER*4, DIMENSION(1) :: imin
++ 	DOUBLE PRECISION, DIMENSION(size(xa)) :: c,d,den,ho,absho
++         if (size(xa)==size(ya)) then
++            n=size(xa)
++         else
++            write(*,*) 'Wrong array sizes in polint'
++            stop
++         end if
++ 	c=ya
++ 	d=ya
++ 	ho=xa-x
++         absho=abs(ho)
++         imin=minloc(absho(:))
++         ns=imin(1)
++ 	y=ya(ns)
++ 	ns=ns-1
++ 	do m=1,n-1
++ 		den(1:n-m)=ho(1:n-m)-ho(1+m:n)
++ 		if (any(den(1:n-m) == 0.0)) then
++                      write(*,*) 'polint: calculation failure'
++                      stop
++                   end if
++ 		den(1:n-m)=(c(2:n-m+1)-d(1:n-m))/den(1:n-m)
++ 		d(1:n-m)=ho(1+m:n)*den(1:n-m)
++ 		c(1:n-m)=ho(1:n-m)*den(1:n-m)
++ 		if (2*ns < n-m) then
++ 			dy=c(ns+1)
++ 		else
++ 			dy=d(ns)
++ 			ns=ns-1
++ 		end if
++ 		y=y+dy
++ 	end do
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++       END SUBROUTINE polint
++ 
++       FUNCTION reallocate_rv(p,n)
++         DOUBLE PRECISION, DIMENSION(:), POINTER :: p, reallocate_rv
++         INTEGER*4, INTENT(IN) :: n
++         INTEGER*4 :: nold,ierr
++         allocate(reallocate_rv(n),stat=ierr)
++         if (ierr /= 0) then
++            write(*,*) 'reallocate_rv: problem in attempt to allocate memory'
++            stop
++         end if
++         if (.not. associated(p)) RETURN
++         nold=size(p)
++         reallocate_rv(1:min(nold,n))=p(1:min(nold,n))
++         deallocate(p)
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++       END FUNCTION reallocate_rv
++ 
++       FUNCTION reallocate_rm(p,n,m)
++         DOUBLE PRECISION, DIMENSION(:,:), POINTER :: p, reallocate_rm
++         INTEGER*4, INTENT(IN) :: n,m
++         INTEGER*4 :: nold,mold,ierr
++         allocate(reallocate_rm(n,m),stat=ierr)
++         if (ierr /= 0) then
++            write(*,*) 'reallocate_rm: problem in attempt to allocate memory'
++            stop
++         end if
++         if (.not. associated(p)) RETURN
++         nold=size(p,1)
++         mold=size(p,2)
++         reallocate_rm(1:min(nold,n),1:min(mold,m))=&
++              p(1:min(nold,n),1:min(mold,m))
++         deallocate(p)
++ !  (C) Copr. 1986-92 Numerical Recipes Software, adapted.
++       END FUNCTION reallocate_rm
++ 
++ END MODULE modpk_utils
+diff -rcBN cosmomc/camb/params_modpk.ini modecode/camb/params_modpk.ini
+*** cosmomc/camb/params_modpk.ini	1969-12-31 19:00:00.000000000 -0500
+--- modecode/camb/params_modpk.ini	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,228 ----
++ #Parameters for CAMB
++ 
++ #output_root is prefixed to ouput file names
++ output_root = test
++ 
++ #What to do
++ get_scalar_cls = T
++ get_vector_cls = F
++ get_tensor_cls = T
++ get_transfer   = F
++ 
++ #if do_lensing then scalar_output_file contains additional columns of l^4 C_l^{pp} and l^3 C_l^{pT}
++ #where p is the projected potential. Output lensed CMB Cls (without tensors) are in lensed_output_file below.
++ do_lensing     = F
++ 
++ # 0: linear, 1: non-linear matter power (HALOFIT), 2: non-linear CMB lensing (HALOFIT)
++ do_nonlinear = 0
++ 
++ #Maximum multipole and k*eta. 
++ #  Note that C_ls near l_max are inaccurate (about 5%), go to 50 more than you need
++ #  Lensed power spectra are computed to l_max_scalar-250 where accurate at %-level
++ #  For high accuracy lensed spectra set l_max_scalar = (l you need) + 500
++ #  To get accurate lensed BB need to have l_max_scalar>2000, k_eta_max_scalar > 10000
++ #  Otherwise k_eta_max_scalar=2*l_max_scalar usually suffices
++ l_max_scalar      = 2000
++ k_eta_max_scalar  = 4000
++ 
++ #  Tensor settings should be less than or equal to the above
++ l_max_tensor      = 1500
++ k_eta_max_tensor  = 3000
++ 
++ #Main cosmological parameters, neutrino masses are assumed degenerate
++ # If use_phyical set phyiscal densities in baryone, CDM and neutrinos + Omega_k
++ use_physical   = T
++ ombh2          = 0.0223
++ omch2          = 0.1072
++ omnuh2         = 0
++ omk            = 0
++ hubble         = 72.
++ #effective equation of state parameter for dark energy, assumed constant
++ w              = -1
++ #constant comoving sound speed of the dark energy (1=quintessence)
++ cs2_lam        = 1
++ 
++ #if use_physical = F set parameters as here
++ #omega_baryon   = 0.0462
++ #omega_cdm      = 0.2538
++ #omega_lambda   = 0.7
++ #omega_neutrino = 0
++ 
++ #massless_neutrinos is the effective number (for QED + non-instantaneous decoupling)
++ temp_cmb           = 2.726
++ helium_fraction    = 0.24
++ massless_neutrinos = 3.04
++ massive_neutrinos  = 0
++ 
++ #Neutrino mass splittings
++ nu_mass_eigenstates = 1
++ #nu_mass_degeneracies = 0 sets nu_mass_degeneracies = massive_neutrinos
++ #otherwise should be an array
++ #e.g. for 3 neutrinos with 2 non-degenerate eigenstates, nu_mass_degeneracies = 2 1
++ nu_mass_degeneracies = 0  
++ #Fraction of total omega_nu h^2 accounted for by each eigenstate, eg. 0.5 0.5
++ nu_mass_fractions = 1
++ 
++ #Initial power spectrum, amplitude, spectral index and running. Pivot k in Mpc^{-1}.
++ initial_power_num         = 1
++ pivot_scalar              = 0.05
++ pivot_tensor              = 0.05
++ scalar_amp(1)             = 2.187e-9
++ scalar_spectral_index(1)  = 0.96
++ scalar_nrun(1)            = 0
++ tensor_spectral_index(1)  = 0
++ #ratio is that of the initial tens/scal power spectrum amplitudes
++ initial_ratio(1)          = 0.158
++ #note vector modes use the scalar settings above
++ 
++ 
++ #MODIFIED P(K)
++ # Use potential specified in modpk_potential.f90 (function 'pot')
++ # for initial power spectrum.
++ use_modpk = T
++ # Which potential to use in modpk_potential.f90
++ potential_choice = 2
++ # Set vnderivs = T to compute dV/dphi and d^2V/dphi^2 numerically,
++ # or vnderivs = F to use user-supplied functional forms in
++ # 'dVdphi' and 'd2Vdphi2' functions in modpk_potential.f90.
++ vnderivs = F
++ # Initial value of inflaton field phi (in units of the reduced Planck mass)
++ phi_init = 1.
++ # Whether to end inflation when slow roll ends
++ # (otherwise, set phi_infl_end below)
++ slowroll_infl_end = T
++ # Phi value at the end of inflation (only used if slowroll_infl_end = F)
++ phi_infl_end = 0.
++ # Whether to assume instantaneous reheating
++ # (otherwise, set k-phi mapping using pivot parameters below)
++ instreheat = F
++ # Pivot scale in Mpc^-1 and number of e-folds of inflation after 
++ # the scale exits the horizon (only used if instreheat = F)
++ k_pivot = 0.05
++ N_pivot = 55.0
++ # Number of potential parameters
++ vparams_num = 2
++ # Potential parameter values
++ vparams(1) = -2.2
++ vparams(2) = 0.8
++ #END MODIFIED P(K)
++ 
++ 
++ #Reionization, ignored unless reionization = T, re_redshift measures where x_e=0.5
++ reionization         = T
++ 
++ re_use_optical_depth = T
++ re_optical_depth     = 0.09
++ #If re_use_optical_depth = F then use following, otherwise ignored
++ re_redshift          = 11
++ #width of reionization transition. CMBFAST model was similar to re_delta_redshift~0.5.
++ re_delta_redshift    = 1.5
++ #re_ionization_frac=-1 sets to become fully ionized using YHe to get helium contribution
++ #Otherwise x_e varies from 0 to re_ionization_frac
++ re_ionization_frac   = -1
++ 
++ 
++ #RECFAST 1.5 recombination parameters;
++ RECFAST_fudge = 1.14
++ RECFAST_fudge_He = 0.86
++ RECFAST_Heswitch = 6
++ RECFAST_Hswitch  = T
++ 
++ #Initial scalar perturbation mode (adiabatic=1, CDM iso=2, Baryon iso=3, 
++ # neutrino density iso =4, neutrino velocity iso = 5) 
++ initial_condition   = 1
++ #If above is zero, use modes in the following (totally correlated) proportions
++ #Note: we assume all modes have the same initial power spectrum
++ initial_vector = -1 0 0 0 0
++ 
++ #For vector modes: 0 for regular (neutrino vorticity mode), 1 for magnetic
++ vector_mode = 0
++ 
++ #Normalization
++ COBE_normalize = F
++ ##CMB_outputscale scales the output Cls
++ #To get MuK^2 set realistic initial amplitude (e.g. scalar_amp(1) = 2.3e-9 above) and
++ #otherwise for dimensionless transfer functions set scalar_amp(1)=1 and use
++ #CMB_outputscale = 1
++ CMB_outputscale = 7.4311e12
++ 
++ #Transfer function settings, transfer_kmax=0.5 is enough for sigma_8
++ #transfer_k_per_logint=0 sets sensible non-even sampling; 
++ #transfer_k_per_logint=5 samples fixed spacing in log-k
++ #transfer_interp_matterpower =T produces matter power in regular interpolated grid in log k; 
++ # use transfer_interp_matterpower =F to output calculated values (e.g. for later interpolation)
++ transfer_high_precision = F
++ transfer_kmax           = 2
++ transfer_k_per_logint   = 0
++ transfer_num_redshifts  = 1
++ transfer_interp_matterpower = T
++ transfer_redshift(1)    = 0
++ transfer_filename(1)    = transfer_out.dat
++ #Matter power spectrum output against k/h in units of h^{-3} Mpc^3
++ transfer_matterpower(1) = matterpower.dat
++ 
++ 
++ #Output files not produced if blank. make camb_fits to use use the FITS setting.
++ scalar_output_file = scalCls.dat
++ vector_output_file = vecCls.dat
++ tensor_output_file = tensCls.dat
++ total_output_file  = totCls.dat
++ lensed_output_file = lensedCls.dat
++ lensed_total_output_file  =lensedtotCls.dat
++ lens_potential_output_file = lenspotentialCls.dat
++ FITS_filename      = scalCls.fits
++ 
++ ##Optional parameters to control the computation speed,accuracy and feedback
++ 
++ #If feedback_level > 0 print out useful information computed about the model
++ feedback_level = 1
++ 
++ # 1: curved correlation function, 2: flat correlation function, 3: inaccurate harmonic method
++ lensing_method = 1
++ accurate_BB = F
++ 
++ 
++ #massive_nu_approx: 0 - integrate distribution function
++ #                   1 - switch to series in velocity weight once non-relativistic
++ #                   2 - use fast approximate scheme (CMB only- accurate for light neutrinos)
++ #                   3 - intelligently use the best accurate method
++ massive_nu_approx = 3
++ 
++ #Whether you are bothered about polarization. 
++ accurate_polarization   = T
++ 
++ #Whether you are bothered about percent accuracy on EE from reionization
++ accurate_reionization   = T
++ 
++ #whether or not to include neutrinos in the tensor evolution equations
++ do_tensor_neutrinos     = F
++ 
++ #Whether to turn off small-scale late time radiation hierarchies (save time,v. accurate)
++ do_late_rad_truncation   = T
++ 
++ #Computation parameters
++ #if number_of_threads=0 assigned automatically
++ number_of_threads       = 0
++ 
++ #Default scalar accuracy is about 0.3% (except lensed BB). 
++ #For 0.1%-level try accuracy_boost=2, l_accuracy_boost=2.
++ 
++ #Increase accuracy_boost to decrease time steps, use more k values,  etc.
++ #Decrease to speed up at cost of worse accuracy. Suggest 0.8 to 3.
++ accuracy_boost          = 1
++ 
++ #Larger to keep more terms in the hierarchy evolution. 
++ l_accuracy_boost        = 1
++ 
++ #Increase to use more C_l values for interpolation.
++ #Increasing a bit will improve the polarization accuracy at l up to 200 -
++ #interpolation errors may be up to 3%
++ #Decrease to speed up non-flat models a bit
++ l_sample_boost          = 1
++ 
++ #MODIFIED P(K)
++ k_src_sample_boost      = 1
++ k_int_sample_boost      = 1
++ do_cls_interpol         = T
++ compute_every_l         = F
++ #END MODIFIED P(K)
+diff -rcBN cosmomc/changes.txt modecode/changes.txt
+*** cosmomc/changes.txt	1969-12-31 19:00:00.000000000 -0500
+--- modecode/changes.txt	2010-07-19 15:41:48.000000000 -0400
+***************
+*** 0 ****
+--- 1,300 ----
++ -------------
++ 6/24/10 (MJM)
++ -------------
++ 
++ - restructured code; main changes: moved several functions and routines to modpk_utils.f90
++ 
++ -------------
++ 6/8/10 (MJM)
++ -------------
++ 
++ - redefined quartic potential (potential_choice=3) in modpk_potential.f90 to be V=(lambda/4)*phi^4 instead of V=lambda*phi^4.
++ 
++ -------------
++ 6/1/10 (MJM)
++ -------------
++ 
++ - merged with May 2010 version of CosmoMC - main changes involve including the new BBN consistency relation for setting Y_He
++ 
++ -------------
++ 2/15/10 (MJM)
++ -------------
++ 
++ - added check for V<0 (hilltop models only) in modpk_utils.f90 ('H is imaginary' error)
++ 
++ -------------
++ 2/11/10 (MJM)
++ -------------
++ 
++ - changed initialphi routine (modpk_potential.f90) and phi_init rescaling (modpk_backgrnd.f90) to work for large Lambda (> 0.01) hilltop inflation models
++ 
++ -------------
++ 2/5/10 (MJM)
++ -------------
++ 
++ - added fix to modpk_backgrnd.f90 from HVP for phi_init switching sign in hilltop models
++ 
++ -------------
++ 2/4/10 (MJM)
++ -------------
++ 
++ - updated CAMB and CosmoMC to January 2010 release
++ 
++ -------------
++ 1/27/10 (MJM)
++ -------------
++ 
++ - modified output of n_s, r, etc. from modpk code to write derived parameters to new columns at the end of the chains instead of in the default columns for these parameters
++ 
++ -------------
++ 1/27/10 (MJM)
++ -------------
++ 
++ - fixed output of amplitude and tilt parameters to chains (previously used parameters from the trial sample, not the last accepted sample); modified cosmomc files: cmbtypes_modpk.f90, CMB_Cls_simple_modpk.f90, params_CMB_modpk.f90
++ 
++ - in backgrnd routine in modpk_backgrnd.f90, added N_pivot computation for instant reheating models
++ 
++ -------------
++ 1/26/10 (MJM)
++ -------------
++ 
++ - modified modpk_modules.f90 and power_tilt_modpk.f90 in camb to set amplitudes and tilts (modpk_As, modpk_r, modpk_ns, modpk_nt, modpk_nrun) at k_pivot from numerically computed P(k). These parameters are output to the chains in a modified WriteParams routine in params_CMB_modpk.f90 (cosmomc).
++ 
++ - updated code to WMAP7
++ 
++ -------------
++ 1/25/10 (MJM)
++ -------------
++ 
++ - added rescale_factor in modpk_backgrnd.f90 to enable different phi_init rescaling step sizes for large field and small field models
++ 
++ -------------
++ 1/22/10 (MJM)
++ -------------
++ 
++ - added hilltop inflation potential (potential_choice=6) to modpk_potential.f90
++ 
++ -------------
++ 1/14/10 (MJM)
++ -------------
++ 
++ - fixed bug in ClsFromTheoryData (cmbtypes_modpk.f90) that caused the tensor C_ls to not be included in the likelihood used by cosmomc.
++ 
++ -------------
++ 1/4/10 (MJM)
++ -------------
++ 
++ - changed potential_choice if-then-else statements to case statements in modpk_potential.f90
++ 
++ - added phi^n potentials with n=1 (potential_choice=4) and n=2/3 (potential_choice=5)
++ 
++ -------------
++ 12/14/09 (MJM)
++ -------------
++ 
++ - updated driver_modpk.F90 and (cosmomc) params_modpk.ini to read name of .paramnames file from the .ini file if specified in the parameter_names_root field (if left blank, default behavior is as described below)
++ 
++ -------------
++ 12/9/09 (MJM)
++ -------------
++ 
++ - changed cosmomc code to read (root).paramnames when using (root).ini (new modpk file: ParamNames.modpk)
++ 
++ -------------
++ 12/7/09 (MJM)
++ -------------
++ 
++ - added lambda phi^4 potential (potential_choice=3) to modpk_potential.f90
++ 
++ -------------
++ 11/17/09 (MJM)
++ -------------
++ 
++ - added initialphi function to modpk_potential.f90 to estimate a reasonable value of phi_init for certain potentials (e.g. natural inflation); changed modpk.f90 to set phi_init=initialphi(phi_init0) in potinit instead of just using phi_init0
++ 
++ -------------
++ 11/14/09 (MJM)
++ -------------
++ 
++ - added natural inflation potential (potential_choice=2) to modpk_potential.f90
++ 
++ - added warnings to modpk_potential.f90 if trying to use analytic forms of V', V'' that are not set for the current potential, and for invalid value of potential_choice
++ 
++ -------------
++ 11/11/09 (MJM)
++ -------------
++ 
++ - changed pk_bad from logical type to integer to keep track of different kinds of pk_bad errors:
++   0: no error
++   1: 'evolve' error (ode_underflow)
++   2: 'backgrnd' error (phi_init rescaling didn't work after 50 tries)
++   3: 'backgrnd' error (inflation ends too late)
++   4: 'trial_background' error (ode_underflow)
++ These numbers are written to the .log file for each chain along with the inflationary parameters for the current model.
++ 
++ -------------
++ 11/10/09 (MJM)
++ -------------
++ 
++ - fixed how CosmoMC and CAMB handle samples with pk_bad set to .true. (code now stops immediately and goes on to next proposed sample)
++ 
++ -------------
++ 11/10/09 (HVP)
++ -------------
++ 
++ - added check for whether a_end for non-instant reheating models is later than the instant-reheating a_end value (not allowed) to modpk_backgrnd.f90
++ 
++ -------------
++ 11/6/09 (MJM)
++ -------------
++ 
++ - updated CosmoMC to October 2009 version (parameter names as array indices, new Makefiles for CosmoMC and CAMB, some new data sets)
++ 
++ -------------
++ 10/21/09 (MJM)
++ -------------
++ 
++ - fixed 'phi_init'-->'phi_init0' problem in driver_modpk.f90
++ 
++ -------------
++ 10/11/09 (HVP)
++ -------------
++ 
++ - modified trial background routine in modpk_backgrnd.f90 to work with instant reheating models
++ 
++ -------------
++ 9/21/09 (MJM)
++ -------------
++ 
++ - updated CAMB with new modpk_backgrnd.f90 (rescales phi_init when it is too small)
++ 
++ - added 'phi_init0' to (CAMB) modpk_modules.f90, modpk.f90, power_tilt_modpk.f90, and (CosmoMC) CMB_Cls_simple_modpk.f90 to keep track of original initial phi value set in CosmoMC params_modpk.ini (resets the value of phi_init for each MCMC sample in case it was rescaled for the previous sample)
++ 
++ - new CosmoMC file, MCMC_modpk.f90 (reports pk_bad errors in .log file); modified calclike_modpk.f90 and (CAMB) power_tilt_modpk.f90 so that C_l's and P(k) splines are no longer computed if background solution encounters a pk_bad error
++ 
++ -------------
++ 8/24/09 (HVP)
++ -------------
++ 
++ - commented out 
++      phi_step = vparams(2)
++      ph=phi_step
++      i=locate(phiarr(1:nactual),ph)
++      j=MIN(MAX(i-(4-1)/2,1),nactual+1-4)
++      epstep=epsarr(j)
++ at the bottom of modpk_backgrnd as this is not needed in a general potential. 
++ At the top of the file commented out epstep and phistep for the same reason. 
++ Changes flagged by !HVP.
++ 
++ - in modpk_odeint, added a check for models where inflation does not end even
++ after Nefold_max efolds when checking the background solution and ode_infl_end is
++ set. In general this flag should only be used for potentials for which inflation
++ is expected to end by the breakdown of slowroll. If this error is encountered for 
++ such a potential it means that you set your phi_init to be way too large.
++  
++ - the number of maximum efolds (previously hardcoded) is now allowed to be 
++ set by the user in MODULE modpkparams, as Nefold_max, with a default set to 10000. 
++ 
++ - new flag phidot_sign (internal use only) to keep track of whether the field is rolling 
++ from left to right or vice versa (in modpkparams).
++ 
++ -Hardcoded dxsav to 0.01 and h1 to 0.1.
++ 
++ - added logical flag slowroll_infl_end into MODULE modpkparams to be used for 
++ potentials for which inflation does not end by the breakdown of slowroll. For such
++ models, inflation is specified to end at  phi_infl_end, also set in the same module.
++ 
++ -   integer :: potential_choice added to MODULE modpkparams. We will make this
++ live for later code release for which we will provide all the models we tested precoded
++ into FUNCTION pot via CASE statements for the ease of use by the end user. Please
++ put this into the CAMB ini file and cosmomc ini file to be read in.
++ 
++ - Added many sanity checks to the code. Failed sanity checks stop the code with a
++ (hopefully helpful) error message, and generally mean that the user asked for some
++ inconsistent or unphysical set of potential and/or initial conditions.
++ 
++ - pk_bad is now set for insufficient inflation.
++ 
++ - Changed the way the background solver is accessed in modpk.f90
++ 
++ - Pretty much all of the files modpk_*90 have been changed since the version MJM
++ sent on 8/18. CAMB-specific files have not been touched. Most major changes are
++ documented above, but for safety (in case there are other more minor changes I 
++ forgot to document) all the files compiled by make powspec should now be replaced. 
++ No files that are not compiled by this command have been changed.
++ 
++ -------------
++ 8/18/09 (MJM)
++ -------------
++ 
++ - commented out k_low and period in modpk_modules.f90
++ 
++ - moved code to read parameters from params.ini from inidriver_modpk.F90 
++ to power_tilt_modpk.f90 (InitialPower_ReadParams)
++ 
++ - in power_tilt_modpk.f90, moved P(k) spline computation from 
++ SetDefPowerParams to InitialPower_ReadParams - will eventually need 
++ to move this somewhere else to use splined P(k) in CosmoMC
++ 
++ -------------
++ 8/13/09 (MJM)
++ -------------
++ 
++ New additions to code:
++ 
++ - tensor power spectrum for arbitrary potential using new code from 7/30 
++ (splined like the scalar spectrum)
++ 
++ - check for interpolation options to prevent l-by-l interpolation 
++ if k_src_sample_boost>1 or k_int_sample_boost>1
++ 
++ - vnderivs: option in params_modpk.ini to switch between exact and 
++ numerically-computed potential derivatives
++ 
++ - phi_init, k_pivot, N_pivot are set in params_modpk.ini (N_pivot no longer 
++ part of vparams array, but could still be included as an MCMC parameter)
++ 
++ - instreheat: option in params_modpk.ini for instantaneous reheating 
++ instead of (k_pivot,N_pivot)
++ 
++ - commented out k_low, H_step, period, etc. in modpk_backgrnd.f90
++ 
++ - standalone P(k) code now included with CAMB modifications (driver_modpk.f90, added to CAMB Makefile - now called 'powspec' instead of 'ps')
++ 
++ - changed a few remaining single precision numbers to double
++ (may still be missing some)
++ 
++ 
++ -------------
++ 7/30/09 (HVP)
++ -------------
++ 
++ k_pivot and phi_init: better to make these keyword accessible from 
++ CAMB/cosmomc ini files than buried in the code (or else put in an 
++ obvious module). We could in principle use the existing scalar pivot 
++ keyword for this purpose.
++ 
++ N_pivot is currently set to vparams(5) inside modpk_background.f90. This 
++ should be set inside the function "pot". We should aim to make this the 
++ only user-modification function.
++ 
++ The task of changing to DP is mostly complete but there are still a few 
++ numbers set with xx.xey now which it would be nice to set in DP just for 
++ completeness.
++ 
++ k_low, H_step, period are just informational parameters that are not 
++ used anywhere else, so we can just comment them out for a generalized 
++ code.
++ 
++ Minimum/max k are really set by observations, so we should either 
++ determine them from cosmomc options or else leave them at conservative 
++ values. I can't imagine that these need to be modified too often by the 
++ user.
++ 
++ relative to files Michael sent, I have modified:
++ modpk.f90
++ modpk_utils.f90
++ modpk_modules.f90
++ modpk_potential.f90
++ modpk_odeint.f90
++ driver_modpk.f90
+diff -rcBN cosmomc/modpkfiles.txt modecode/modpkfiles.txt
+*** cosmomc/modpkfiles.txt	1969-12-31 19:00:00.000000000 -0500
+--- modecode/modpkfiles.txt	2010-07-19 15:41:51.000000000 -0400
+***************
+*** 0 ****
+--- 1,31 ----
++ New/modified CAMB files for P(k) features code:
++ 
++ New:
++ 
++ dverk.f
++ modpk_backgrnd.f90
++ modpk.f90
++ modpk_modules.f90
++ modpk_odeint.f90
++ modpk_potential.f90
++ modpk_utils.f90
++ locate.f90
++ nr.f90
++ nrtype.f90
++ polint.f90
++ rkck.f90
++ rkqs.f90
++ driver_modpk.f90
++ 
++ 
++ Modified:
++ 
++ Makefile [power_tilt-->power_tilt_modpk, similar changes for modules, cmbmain, inidriver; add PKOBJ list of new .o files, add $(PKOBJ) before $(CAMBOBJ) in camb: and $(CAMBLIB): lines.]
++ power_tilt_modpk.f90
++ inidriver_modpk.F90
++ modules_modpk.f90
++ cmbmain_modpk.f90
++ camb_modpk.f90
++ params_modpk.ini
++ 
++ Search for MODIFIED P(K) for changes to the files.
+diff -rcBN cosmomc/source/nest_driver.f90 modecode/source/nest_driver.f90
+*** cosmomc/source/nest_driver.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/source/nest_driver.f90	2010-07-19 15:41:51.000000000 -0400
+***************
+*** 0 ****
+--- 1,245 ----
++ 
++ 
++ program SolveCosmology
++         use IniFile
++         use MonteCarlo
++         use ParamDef
++         use settings
++         use cmbdata
++         use posthoc
++         use WeakLen
++         use CalcLike
++         use EstCovmatModule
++         use ConjGradModule
++         use mpk
++         use MatrixUtils
++         use nestwrap
++         implicit none
++       
++         
++ ! This is a driving routine that illustrates the use of the program.
++         character(LEN=Ini_max_string_len) InputFile, LogFile
++ 
++ 
++         logical bad, est_bfp_before_covmat
++         integer numsets, nummpksets, i, numtoget, action, seed
++         character(LEN=Ini_max_string_len) baseroot, filename(100), &
++          mpk_filename(100),  SZTemplate(100), numstr, fname
++         real SZscale(100)
++         Type(ParamSet) Params, EstParams
++         integer num_points
++         integer status          
++         real delta_loglike
++ 
++ 
++ 	InputFile = GetParam(1)
++         if (InputFile == '') call DoStop('No parameter input file')
++ 	
++         numstr = GetParam(2)
++         if (numstr /= '') then
++          read(numstr,*) instance
++          rand_inst = instance   
++         else
++          instance = 0
++         end if
++ 
++         call Ini_Open(InputFile, 1, bad, .false.)
++         if (bad) call DoStop('Error opening parameter file')
++         Ini_fail_on_not_found = .false.
++ 
++         propose_scale = Ini_Read_Real('propose_scale',2.4)
++         AccuracyLevel = Ini_Read_Real('accuracy_level',1.)
++ 
++         nest_resume = Ini_Read_Logical('checkpoint',.false.)
++ 	checkpoint = .false.
++ 
++         Ini_fail_on_not_found = .true.
++         
++         baseroot = Ini_Read_String('file_root')
++         
++         rootname = trim(baseroot)
++ 
++         FileChangeIniAll = trim(rootname)//'.read'
++ 
++         if (instance /= 0) then
++             rootname = trim(rootname)//'_'//trim(adjustl(numstr))
++         end if
++ 
++         new_chains = .true. 
++ 
++         action = Ini_Read_Int('action',0)
++ 	if(action/=3) then
++ 		write(*,*)"This executable can only be used to with MultiNest (action=3)"
++ 		stop
++ 	endif
++ 
++ 
++         FeedBack = Ini_Read_Int('feedback',0)
++         FileChangeIni = trim(rootname)//'.read'
++ 
++         if (action /= 1) then
++ 
++         	LogFile = trim(rootname)//'.log'
++ 
++         	if (LogFile /= '') then
++          		logfile_unit = 49
++          		call CreateOpenTxtFile(LogFile,logfile_unit,.not. new_chains)
++         	else
++          		logfile_unit = 0
++         	end if
++ 
++         	outfile_unit = 48
++         	fname = trim(rootname)//'.txt'
++         	if (new_chains) call CreateTxtFile(fname,outfile_unit)
++ 
++         	indep_sample = Ini_Read_Int('indep_sample')
++         	if (indep_sample /=0) then
++           		indepfile_unit = 47
++           		fname = trim(rootname)//'.data' 
++           		call CreateOpenFile(fname,indepfile_unit,'unformatted',.not. new_chains)
++           		!open(unit=indepfile_unit,file=fname,form='unformatted',status='replace')
++         	end if
++  
++         	Ini_fail_on_not_found = .false.
++         	burn_in = Ini_Read_Int('burn_in',0)     
++         	sampling_method = Ini_Read_Int('sampling_method',sampling_metropolis)
++         	if (sampling_method > 6 .or. sampling_method<1) call DoStop('Unknown sampling method')
++         	if (sampling_method==4) directional_grid_steps = Ini_Read_Int('directional_grid_steps',20)
++         end if
++ 
++         numstr = Ini_Read_String('rand_seed')
++         if (numstr /= '') then
++           read(numstr,*) seed
++           call InitRandom(seed)
++         else
++           seed=0
++           call InitRandom()
++         end if
++ 
++         use_nonlinear = Ini_Read_Logical('nonlinear_pk',.false.)
++         pivot_k = Ini_Read_Real('pivot_k',0.05)
++         inflation_consistency = Ini_read_Logical('inflation_consistency',.false.)
++ 
++         w_is_w = Ini_Read_Logical ('w_is_w',.true.)     
++         oversample_fast = Ini_Read_Int('oversample_fast',1)
++         use_fast_slow = Ini_read_Logical('use_fast_slow',.true.)
++  
++         if (Ini_Read_Logical('cmb_hyperparameters', .false.)) &
++             call DoStop( 'Hyperparameters not supported any more')
++ 
++         if (Ini_Read_String('use_2dF') /= '') stop 'use_2dF now replaced with use_mpk'
++         Use_Clusters = Ini_Read_Logical('use_clusters',.false.)
++         Use_mpk = Ini_Read_Logical('use_mpk',.false.) ! matter power spectrum, incl 2dF
++         Use_HST = Ini_Read_Logical('use_HST',.true.)
++         Use_BBN = Ini_Read_Logical('use_BBN',.false.)
++         Use_Age_Tophat_Prior= Ini_Read_Logical('use_Age_Tophat_Prior',.true.)
++         Use_SN = Ini_Read_Logical('use_SN',.false.)
++         Use_CMB = Ini_Read_Logical('use_CMB',.true.)
++         Use_WeakLen = Ini_Read_Logical('use_WeakLen',.false.)
++         Use_min_zre = Ini_Read_Double('use_min_zre',0.d0) 
++         Use_Lya = Ini_Read_logical('use_lya',.false.)
++         if (Use_Lya .and. use_nonlinear) &
++              call DoStop('Lya.f90 assumes LINEAR power spectrum input')
++ 
++ 
++         !flag to force getting sigma8 even if not using LSS data 
++         use_LSS = Ini_Read_Logical('get_sigma8',.false.)
++         ! use_LSS = Use_2dF .or. Use_Clusters .or. Use_WeakLen
++         use_LSS = Use_LSS .or. Use_mpk .or. Use_Clusters .or. Use_WeakLen .or. Use_Lya
++ 
++         Temperature = Ini_Read_Real('temperature',1.)
++         
++         num_threads = Ini_Read_Int('num_threads',0)
++         !$ if (num_threads /=0) call OMP_SET_NUM_THREADS(num_threads)
++ 
++ 
++         estimate_propose_matrix = Ini_Read_Logical('estimate_propose_matrix',.false.)
++         if (estimate_propose_matrix) then
++          if (Ini_Read_String('propose_matrix') /= '') &
++            call DoStop('Cannot have estimate_propose_matrix and propose_matrix')
++         end if
++ 
++         delta_loglike = Ini_Read_Real('delta_loglike',2.)
++         est_bfp_before_covmat = Ini_Read_Logical('est_bfp_before_covmat',.true.) ! for testing
++ 
++         Ini_fail_on_not_found = .true.
++ 
++         call Initialize(Params)
++         
++         numsets = Ini_Read_Int('cmb_numdatasets')
++         do i= 1, numsets
++          filename(i) = Ini_Read_String(numcat('cmb_dataset',i)) 
++          !Need to close this ini file before reading in from another
++         end do
++ 
++         Ini_fail_on_not_found = .false.
++ 
++         do i= 1, numsets
++          SZTemplate(i) = Ini_Read_String(numcat('cmb_dataset_SZ',i)) 
++          if (SZTemplate(i)/='') then
++           SZScale(i) = Ini_read_Real(numcat('cmb_dataset_SZ_scale',i),1.0)
++          end if 
++         end do
++         
++         !read the nested sampling parameters
++         if(action==3) then
++           !if (instance .ne. 0) call doStop('Warning - Nested Sampler does not support MPI yet. Pls switch it off, recompile and re-run on 1 processor')
++           !set up nested sampling parameters
++ 	  nest_mmodal = Ini_Read_Logical('multimodal',.false.)
++           nest_nlive = Ini_Read_Int('nlive',400)
++           nest_maxmodes = Ini_Read_Int('maxmodes',1)
++           nest_efr = Ini_Read_Double('eff',0.3d0)
++           nest_tol = Ini_Read_Double('tol',0.5d0)
++ 	  nest_ceff = Ini_Read_Logical('ceff',.false.)
++ 	  nest_updInt = Ini_Read_Int('updInt',50)
++           nest_root=rootname
++           !set up the seed for the nested sampler
++           if (seed /= 0) then
++              nest_seed = seed
++           else
++              nest_seed=-1 !take it from system clock
++           end if
++           !feedback for the nested sampler
++           if(FeedBack>0) then
++              nest_fb=.true.
++           else
++              nest_fb=.false.
++           end if
++         endif
++ 
++         Ini_fail_on_not_found = .true.
++         
++         nummpksets = Ini_Read_Int('mpk_numdatasets',0)
++         do i= 1, nummpksets
++          mpk_filename(i) = Ini_Read_String(numcat('mpk_dataset',i)) 
++         end do
++ 
++         numtoget = Ini_Read_Int('samples')
++ 
++         call Ini_Close
++ 
++         call SetIdlePriority !If running on Windows
++ 
++         num_points = 0
++         if (Use_CMB) then
++          do i= 1, numsets
++           call ReadDataset(filename(i))
++           num_points = num_points + datasets(i)%num_points
++           if (SZTemplate(i)/='') call ReadSZTemplate(datasets(i), SZTemplate(i),SZScale(i))
++          end do
++          if (Feedback > 1) write (*,*) 'read datasets'
++         end if
++ 
++         if (Use_mpk) then
++          do i=1,nummpksets
++           call ReadMpkDataset(mpk_filename(i))
++          end do
++         if (Feedback>1) write(*,*) 'read mpk datasets'
++         end if
++ 
++ 
++ 	call nest_Sample
++ 
++ 
++ end program SolveCosmology
++ 
+diff -rcBN cosmomc/source/nestwrap.f90 modecode/source/nestwrap.f90
+*** cosmomc/source/nestwrap.f90	1969-12-31 19:00:00.000000000 -0500
+--- modecode/source/nestwrap.f90	2010-07-19 15:41:51.000000000 -0400
+***************
+*** 0 ****
+--- 1,126 ----
++ ! The wrapper for MultiNest
++ ! Apr 2008
++ ! Author: Farhan Feroz
++ 
++ module nestwrap
++   use ParamDef
++   use CalcLike
++   use propose
++   use nested
++   implicit none
++   
++   !nested sampling parameters
++   logical nest_mmodal !multiple modes expected?
++   logical nest_ceff !run in constant efficiency mode?
++   integer nest_nlive !no. of live points
++   integer nest_nPar !tot no. of parameters to be saved along with the sampling parameters
++   integer nest_seed !seed for nested sampler, -ve means take it from sys clock
++   real*8 nest_tol !evidence tolerance factor
++   real*8 nest_efr !sampling efficiency
++   character*100 nest_root !root for saving posterior files
++   integer nest_maxModes !max modes expected, for memory allocation
++   logical nest_fb !feedback on the sampling progress?
++   logical nest_resume !resume from a previous run?
++   integer sdim !dimensionality
++   integer, dimension(:), allocatable :: nest_pWrap
++   integer nest_updInt !no. of iterations after which to update on the progress
++   
++   !retain Curparams throughout, for the code to be run in the only fast params mode
++   Type(ParamSet) Curparams
++ 
++ contains
++ 
++ !-------------------------------------------------------------------------
++   
++   subroutine setup
++     implicit none
++  
++     real*8 cosparams(num_params),lnew
++     Type(ParamSet) Trial
++     integer i
++     
++     cosparams = Scales%center
++     Trial%P = cosparams
++     lnew = -GetLogLike(Trial)
++     Curparams=Trial !retain Curparams throughout, for the code to be run in the only fast params mode
++     write(*,*) 'LIKELIHOOD TEST', lnew, cosparams
++     
++     !set up the prior ranges & the dimensionality
++     sdim=0
++     do i=1,num_params_used
++        if(Scales%Pmin(params_used(i))/=Scales%Pmax(params_used(i))) sdim=sdim+1
++     enddo
++     
++     !set dimensionaity
++     nest_nPar=num_params_used
++     
++     if (Feedback > 1) then
++       write(*,*) 'Dimensionality of param space = ', sdim
++       write(*,*) 'Number of derived parameters  = ', nest_nPar-sdim
++       write(*,*) 'Location of ln(like) in live points file, column = ', nest_nPar-sdim+1
++     endif
++     
++   end subroutine setup
++   
++ !-------------------------------------------------------------------------
++   
++   subroutine getLogLikeNS(Cube,n_dim,nPar,lnew,context)
++     implicit none
++     
++     integer i,j,context,n_dim,nPar
++     real*8 cosparams(num_params),Cube(nPar),lnew
++     logical accept
++     Type(ParamSet) Trial
++     real*8 logZero
++     parameter(logZero=-huge(1.d0)*epsilon(1.d0))
++     character(LEN=60) fmt
++     accept=.false.
++     
++     cosparams = Scales%center
++     j=0
++     do i=1,num_params_used
++     	 if(Scales%Pmin(params_used(i))/=Scales%Pmax(params_used(i))) then
++        	j=j+1
++     	 	Cube(j)=Scales%Pmin(params_used(i))+(Scales%Pmax(params_used(i))-Scales%Pmin(params_used(i)))*Cube(j)
++        	cosparams(params_used(i))=Cube(j)
++ 	 else
++        	cosparams(params_used(i))=Scales%Pmin(params_used(i))
++ 	 endif
++     enddo
++     
++     Trial=Curparams
++     Trial%P=cosparams
++     lnew=-GetLogLike(Trial)
++     if(lnew<-1.d20) lnew=logZero
++     call AcceptReject(accept,CurParams%Info,Trial%Info)
++ 
++  
++ fmt = trim(numcat('(2E16.7,',num_params))//'E16.7)'
++  
++ write(109, fmt) lnew, lnew, Trial%P
++   
++   end subroutine getLogLikeNS
++       	
++ !-------------------------------------------------------------------------
++ 
++ subroutine nest_Sample
++    integer nclusters,context !total number of clusters found
++    integer maxNode !variables used by the posterior routine
++   
++    call setup
++ 
++    allocate(nest_pWrap(sdim))
++    nest_pWrap=0
++     
++     
++    call nestRun(nest_mmodal,nest_ceff,nest_nlive,nest_tol,nest_efr,sdim,nest_nPar, &
++    2,nest_maxModes,nest_updInt,-1.d90,nest_root,nest_seed,nest_pWrap, &
++    nest_fb,nest_resume,getLogLikeNS,context)
++    
++    deallocate(nest_pWrap)
++ 
++ end subroutine nest_Sample
++       	
++ !-------------------------------------------------------------------------
++ 
++ end module nestwrap
+diff -rcBN cosmomc/source/params_modpk.ini modecode/source/params_modpk.ini
+*** cosmomc/source/params_modpk.ini	1969-12-31 19:00:00.000000000 -0500
+--- modecode/source/params_modpk.ini	2010-07-19 15:41:51.000000000 -0400
+***************
+*** 0 ****
+--- 1,235 ----
++ #Sample parameters for cosmomc in default parameterization
++ 
++ #Root name for files produced
++ file_root = chains/lphi4_nirh_01
++ 
++ #Parameter names file
++ ParamNamesFile = params_modpk.paramnames
++ 
++ #action = 0:  MCMC, action=1: postprocess .data file, action=2: find best fit point only
++ action = 0
++ 
++ #Maximum number of chain steps
++ samples = 200000
++ 
++ #Feedback level ( 2=lots,1=chatty,0=none)
++ #MODIFIED P(K)
++ # (use feedback=3 to write C_l for all samples to file_root.clt, .clc, .cle; specify l range in WriteParams in params_CMB_modpk.f90)
++ #END MODIFIED P(K)
++ feedback = 2
++ 
++ #Temperature at which to Monte-Carlo
++ temperature = 1
++ 
++ #filenames for CMB datasets and SZ templates (added to C_l times parameter(13))
++ #Note you may need to change lmax in cmbtypes.f90 to use small scales (e.g. lmax=2100)
++ cmb_numdatasets = 1
++ cmb_dataset1 = WMAP
++ cmb_dataset_SZ1 = data/WMAP_SZ_VBand.dat
++ cmb_dataset_SZ_scale1 = 1
++ 
++ cmb_dataset2 = data/acbar2007_v3_corr.newdat
++ cmb_dataset_SZ2 = data/WMAP_SZ_VBand.dat
++ cmb_dataset_SZ_scale2 = 0.28
++ 
++ cmb_dataset3 = data/CBIpol_2.0_final.newdat
++ cmb_dataset4 = data/B03_NA_21July05.newdat
++ 
++ #filenames for matter power spectrum datasets, incl twodf
++ mpk_numdatasets = 1
++ mpk_dataset1 = data/lrgDR7kmax02kmin02newmaxLv2ALL_MAGCOVv3.dataset
++ #mpk_dataset1 = data/sdss_lrgDR4.dataset
++ #mpk_dataset1 = data/2df_2005.dataset
++ 
++ #filename for supernovae (default SDSS compilation)
++ SN_filename = data/supernovae.dataset
++ 
++ #if true, use HALOFIT for non-linear corrections (astro-ph/0207664).
++ #note lyman-alpha (lya) code assumes linear spectrum
++ nonlinear_pk = F
++ 
++ use_CMB = T
++ use_HST = F
++ use_mpk = F
++ use_bao = F
++ use_clusters = F
++ use_BBN = F
++ use_Age_Tophat_Prior = T
++ use_SN = F
++ use_lya = F
++ use_min_zre = 0
++ 
++ #directory, e.g. window functions in directory windows under data_dir
++ data_dir = data/
++ 
++ #Force computation of sigma_8 even if use_mpk = F
++ get_sigma8 = F
++ 
++ #1: Simple Metropolis, 2: slice sampling, 3: slice sampling fast parameters, 4: directional gridding
++ sampling_method = 1
++ 
++ #if sampling_method =4, iterations per gridded direction
++ directional_grid_steps = 20
++ 
++ #use fast-slow parameter distinctions to speed up 
++ #(note for basic models WMAP3 code is only ~3x as fast as CAMB)
++ use_fast_slow = F
++ 
++ #Can use covariance matrix for proposal density, otherwise use settings below
++ #Covariance matrix can be produced using "getdist" program.
++ #propose_matrix = params_CMB.covmat
++ propose_matrix = 
++ 
++ #If propose_matrix is blank (first run), can try to use numerical Hessian to 
++ #estimate a good propose matrix. As a byproduct you also get an approx best fit point
++ estimate_propose_matrix = F
++ 
++ #Tolerance on log likelihood to use when estimating best fit point
++ delta_loglike = 2
++ 
++ #Scale of proposal relative to covariance; 2.4 is recommended by astro-ph/0405462 for Gaussians
++ #If propose_matrix is much broader than the new distribution, make proportionately smaller
++ #Generally make smaller if your acceptance rate is too low
++ propose_scale = 2.4
++ 
++ #Increase to oversample fast parameters more, e.g. if space is odd shape
++ oversample_fast = 1
++ 
++ #if non-zero number of steps between sample info dumped to file file_root.data
++ indep_sample = 0
++ 
++ #number of samples to disgard at start; usually set to zero and remove later
++ burn_in = 0
++ 
++ #If zero set automatically
++ num_threads = 0
++ 
++ #MPI mode multi-chain options (recommended)
++ #MPI_Converge_Stop is a (variance of chain means)/(mean of variances) parameter that can be used to stop the chains
++ #Set to a negative number not to use this feature. Does not guarantee good accuracy of confidence limits.
++ MPI_Converge_Stop = 0.01
++ 
++ #Do initial period of slice sampling; may be good idea if 
++ #cov matrix or widths are likely to be very poor estimates
++ MPI_StartSliceSampling  = F
++ 
++ #Can optionally also check for convergence of confidence limits (after MPI_Converge_Stop reached)
++ #Can be good idea as small value of MPI_Converge_Stop does not (necessarily) imply good exploration of tails
++ MPI_Check_Limit_Converge = T
++ 
++ #if MPI_Check_Limit_Converge = T, give tail fraction to check (checks both tails):
++ MPI_Limit_Converge = 0.025
++ #permitted quantile chain variance in units of the standard deviation (small values v slow):
++ MPI_Limit_Converge_Err = 0.2
++ #which parameter's tails to check. If zero, check all parameters:
++ MPI_Limit_Param = 0
++ 
++ #if MPI_LearnPropose = T, the proposal density is continally updated from the covariance of samples so far (since burn in)
++ MPI_LearnPropose = T
++ #can set a value of converge at which to stop updating covariance (so that it becomes rigorously Markovian)
++ #e.g. MPI_R_StopProposeUpdate = 0.4 will stop updating when (variance of chain means)/(mean of variances) < 0.4
++ MPI_R_StopProposeUpdate = 0
++ 
++ #If have covmat, R to reach before updating proposal density (increase if covmat likely to be poor)
++ #Only used if not varying new parameters that are fixed in covmat
++ MPI_Max_R_ProposeUpdate = 2
++ #As above, but used if varying new parameters that were fixed in covmat
++ MPI_Max_R_ProposeUpdateNew = 40
++ 
++ #if blank this is set from system clock
++ rand_seed = 
++ 
++ #If true, generate checkpoint files and terminated runs can be restarted using exactly the same command
++ #and chains continued from where they stopped
++ #With checkpoint=T note you must delete all chains/file_root.* files if you want new chains with an old file_root
++ checkpoint = T
++ 
++ 
++ #CAMB parameters
++ #If we are including tensors
++ compute_tensors = T
++ #Initial power spectrum amplitude point (Mpc^{-1})
++ pivot_k = 0.05
++ #If using tensors, enforce n_T = -A_T/(8A_s)
++ inflation_consistency = F
++ 
++ #Whether the CMB should be lensed (slows a lot unless also computing matter power)
++ CMB_lensing = F
++ #increase accuracy_level to run CAMB on higher accuracy
++ #(default is about 0.3%, accuracy_level=2 around 0.1% at high l)
++ accuracy_level = 1
++ 
++ #MODIFIED P(K)
++ #Initial power spectrum using modified inflationary potential
++ use_modpk = T
++ #Which form of the potential to use (see 'pot' in modpk_potential.f90)
++ potential_choice = 3
++ #Set vnderivs = T to compute dV/dphi and d^2V/dphi^2 numerically,
++ #or vnderivs = F to use user-supplied functional forms in
++ #'dVdphi' and 'd2Vdphi2' functions in modpk_potential.f90.
++ vnderivs = F
++ #Initial value of inflaton field phi (in units of the reduced Planck mass)
++ phi_init = 20.
++ #Whether to end inflation when slow roll ends
++ #(otherwise, set phi_infl_end below)
++ slowroll_infl_end = T
++ #Phi value at the end of inflation (only used if slowroll_infl_end = F)
++ phi_infl_end = 0.0
++ #Whether to assume instantaneous reheating
++ #(otherwise, set k-phi mapping using pivot parameters below)
++ instreheat = F
++ #Pivot scale for inflation in Mpc^-1 (only used if instreheat = F)
++ infl_pivot_k = 0.05
++ #END MODIFIED P(K)
++ 
++ #If action = 1
++ redo_likelihoods = T
++ redo_theory = T
++ redo_cls = F
++ redo_pk = F
++ redo_skip = 0
++ redo_outroot = 
++ redo_thin = 1
++ redo_add = T
++ redo_from_text = T
++ #If large difference in log likelihoods may need to offset to give sensible weights
++ #for exp(difference in likelihoods)
++ redo_likeoffset =  0
++ 
++ #parameter start center, min, max, start width, st. dev. estimate
++ param[omegabh2] = 0.0223 0.005 0.1 0.001 0.001
++ param[omegadmh2] = 0.105 0.01 0.99 0.01 0.01
++ param[theta] = 1.04 0.5 10 0.002 0.002
++ param[tau] = 0.09 0.01 0.8 0.03 0.03
++ 
++ param[omegak] = 0 0 0 0 0
++ param[fnu] = 0 0 0 0 0
++ param[w] = -1 -1 -1 0 0
++ 
++ param[ns] = 0 0 0 0 0
++ param[nt] = 0 0 0 0 0
++ param[nrun] = 0 0 0 0 0
++ 
++ #log[10^10 A_s]
++ param[logA] = 0 0 0 0 0
++ param[r] = 0 0 0 0 0
++ #SZ amplitude, as in WMAP analysis
++ param[asz]= 1 0 2 0.4 0.4
++ 
++ #MODIFIED P(K)
++ #inflationary potential parameters
++ #N_pivot
++ param[Npivot] = 50 20 70 5 5
++ #param[Npivot] = 50 50 50 0 0
++ #vparams array
++ param[vpar1] = -12.5 -14 -11 0.1 0.1
++ param[vpar2] = 0 0 0 0 0
++ param[vpar3] = 0 0 0 0 0
++ param[vpar4] = 0 0 0 0 0
++ param[vpar5] = 0 0 0 0 0
++ param[vpar6] = 0 0 0 0 0
++ param[vpar7] = 0 0 0 0 0
++ param[vpar8] = 0 0 0 0 0
++ param[vpar9] = 0 0 0 0 0
++ 
++ 
+diff -rcBN cosmomc/source/params_modpk.paramnames modecode/source/params_modpk.paramnames
+*** cosmomc/source/params_modpk.paramnames	1969-12-31 19:00:00.000000000 -0500
+--- modecode/source/params_modpk.paramnames	2010-07-19 15:41:51.000000000 -0400
+***************
+*** 0 ****
+--- 1,36 ----
++ omegabh2      \Omega_b h^2	#physical baryon density
++ omegadmh2     \Omega_c h^2	#physical dark matter density, including CDM and massive neutrinos
++ theta         100 \theta_A		#100 times the ratio of the angular diameter distance to the LSS sound horizon (approx)
++ tau           \tau
++ omegak        \Omega_K
++ fnu           f_\nu		#neutrino energy density as fraction of omegadmh2
++ w             w			#constant equation of state parameter for scalar field dark energy 
++ ns            n_s		#beware that pivot scale can change in .ini file
++ nt            n_t
++ nrun          n_{run}
++ logA          ln(10^{10} A_s)
++ r             r			#ratio of tensor to scalar primordial amplitudes at pivot scale
++ asz           A_{SZ}		#SZ template amplitude, as in WMAP
++ Npivot	      N_{pivot}		#number of e-folds of inflation after k_pivot exits horizon
++ vpar1	      log \lambda	#potential parameter 1
++ vpar2	      V_2		#potential parameter 2
++ vpar3	      V_3		#potential parameter 3
++ vpar4	      V_4		#potential parameter 4
++ vpar5	      V_5		#potential parameter 5
++ vpar6	      V_6		#potential parameter 6
++ vpar7	      V_7		#potential parameter 7
++ vpar8	      V_8		#potential parameter 8
++ vpar9	      V_9		#potential parameter 9
++ omegal*       \Omega_\Lambda
++ age*          Age/Gyr
++ omegam*       \Omega_m
++ sigma8*       \sigma_8
++ zrei*         z_{re}
++ r10*          r_{10}		#tensor-scalar C_l amplitude at l=10
++ H0*           100 h		#hubble parameter is H0 km/s/Mpc
++ modpk_Npivot* N_{pivot}		#number of e-folds of inflation after k_pivot exits horizon
++ modpk_ns*     n_s		#beware that pivot scale can change in .ini file
++ modpk_nt*     n_t
++ modpk_nrun*   n_{run}
++ modpk_logA*   ln(10^{10} A_s)
++ modpk_r*      r			#ratio of tensor to scalar primordial amplitudes at pivot scale
+\ No newline at end of file
